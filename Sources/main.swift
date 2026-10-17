@@ -614,11 +614,14 @@ private final class DisplayController {
     }
 }
 
-private final class StatusIndicator: NSObject {
+private final class StatusIndicator: NSObject, NSMenuDelegate {
     private let presenceDelayOptions = [180, 300, 600]
     private let item: NSStatusItem
     private let lamp: LampController
-    private let popover = NSPopover()
+    private let statusMenu = NSMenu()
+    private var isMenuOpen = false
+    private var brightnessMenuItem = NSMenuItem()
+    private var temperatureMenuItem = NSMenuItem()
     private let powerSwitch = FeatureButton(title: "灯光", symbol: "power", accentColor: activeControlColor)
     private let brightnessSlider = InteractiveSlider(value: 50, minValue: 1, maxValue: 100, activeColor: .systemBlue)
     private let brightnessValueLabel = NSTextField(labelWithString: "50%")
@@ -727,10 +730,9 @@ private final class StatusIndicator: NSObject {
 
         item.button?.title = ""
         item.button?.imagePosition = .imageOnly
-        item.button?.target = self
-        item.button?.action = #selector(togglePanel)
         migrateDisplayPresetIfNeeded()
         configurePanel()
+        configureMenu()
         NotificationCenter.default.addObserver(self, selector: #selector(applicationWillTerminate),
                                                name: NSApplication.willTerminateNotification, object: nil)
         let workspaceNotifications = NSWorkspace.shared.notificationCenter
@@ -770,18 +772,165 @@ private final class StatusIndicator: NSObject {
            (displayController.studioTarget() == nil || isConsoleSessionLocked()) {
             _ = displayController.setStudioEnabled(true)
         }
-        if popover.isShown { refreshControls() }
+        if isMenuOpen { refreshControls() }
     }
 
-    @objc private func togglePanel() {
-        guard let button = item.button else { return }
-        if popover.isShown {
-            popover.performClose(nil)
-        } else {
-            lamp.requestStatus()
-            refreshControls()
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+    private func configureMenu() {
+        statusMenu.delegate = self
+        statusMenu.autoenablesItems = false
+        brightnessMenuItem = menuSliderItem(symbol: "sun.max", title: "亮度", slider: brightnessSlider, valueLabel: brightnessValueLabel)
+        temperatureMenuItem = menuSliderItem(symbol: "thermometer.medium", title: "色温", slider: temperatureSlider, valueLabel: temperatureValueLabel)
+        item.menu = statusMenu
+    }
+
+    func menuWillOpen(_ menu: NSMenu) { isMenuOpen = true }
+
+    func menuDidClose(_ menu: NSMenu) { isMenuOpen = false }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === statusMenu else { return }
+        lamp.requestStatus()
+        refreshControls()
+        menu.removeAllItems()
+
+        menu.addItem(.sectionHeader(title: "快捷控制"))
+        for button in [powerSwitch, autoLightSwitch, presenceSwitch, videoModeSwitch, brightnessFollowSwitch,
+                       powerSyncSwitch, timeTemperatureSwitch, displayBrightnessLockSwitch, keepAwakeSwitch] {
+            menu.addItem(menuItem(for: button))
         }
+
+        menu.addItem(.separator())
+        menu.addItem(.sectionHeader(title: "灯光调节"))
+        menu.addItem(brightnessMenuItem)
+        menu.addItem(temperatureMenuItem)
+
+        menu.addItem(.separator())
+        menu.addItem(.sectionHeader(title: "环境光标定"))
+        menu.addItem(menuItem(for: ambientEnableSwitch, title: "启用"))
+        menu.addItem(menuItem(for: captureBrightButton, toggle: false,
+                              title: "\(captureBrightButton.title)　\(brightThresholdLabel.stringValue)"))
+        menu.addItem(menuItem(for: captureDarkButton, toggle: false,
+                              title: "\(captureDarkButton.title)　\(darkThresholdLabel.stringValue)"))
+        let ambientStatus = NSMenuItem(title: ambientStatusLabel.stringValue, action: nil, keyEquivalent: "")
+        ambientStatus.isEnabled = false
+        menu.addItem(ambientStatus)
+
+        menu.addItem(.separator())
+        menu.addItem(.sectionHeader(title: "入座检测设置"))
+        menu.addItem(popupMenuItem(symbol: "clock", title: "离席时间", popup: presenceDelayPopup))
+        menu.addItem(popupMenuItem(symbol: "gauge", title: "侦测灵敏度", popup: presenceSensitivityPopup))
+
+        menu.addItem(.separator())
+        menu.addItem(.sectionHeader(title: "显示屏与旋转"))
+        menu.addItem(menuItem(for: displayPowerSwitch))
+        menu.addItem(menuItem(for: studioPowerSwitch))
+        menu.addItem(menuItem(for: displayRotateButton, toggle: false))
+
+        menu.addItem(.separator())
+        menu.addItem(.sectionHeader(title: "预设"))
+        menu.addItem(modePresetMenuItem())
+        menu.addItem(rotationPresetMenuItem())
+
+        menu.addItem(.separator())
+        let quit = NSMenuItem(title: "退出 iScreen Menu", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        quit.target = NSApp
+        menu.addItem(quit)
+    }
+
+    /// 把面板中的按钮映射为菜单项；按钮本身仍保存状态并承载原有的 action。
+    private func menuItem(for button: NSButton, toggle: Bool = true, title: String? = nil) -> NSMenuItem {
+        let item = NSMenuItem(title: title ?? button.title, action: #selector(menuButtonClicked(_:)), keyEquivalent: "")
+        item.target = self
+        item.representedObject = button
+        item.tag = toggle ? 1 : 0
+        item.image = button.image
+        item.state = toggle ? button.state : .off
+        item.isEnabled = button.isEnabled
+        item.toolTip = button.toolTip
+        return item
+    }
+
+    @objc private func menuButtonClicked(_ sender: NSMenuItem) {
+        guard let button = sender.representedObject as? NSButton, let action = button.action else { return }
+        if sender.tag == 1 { button.state = button.state == .on ? .off : .on }
+        NSApp.sendAction(action, to: button.target, from: button)
+    }
+
+    private func menuSliderItem(symbol: String, title: String, slider: NSSlider, valueLabel: NSTextField) -> NSMenuItem {
+        let row = sliderRow(symbol: symbol, title: title, slider: slider, valueLabel: valueLabel)
+        row.translatesAutoresizingMaskIntoConstraints = false
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: UIStyle.contentWidth + 28, height: 30))
+        container.addSubview(row)
+        NSLayoutConstraint.activate([
+            row.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 14),
+            row.centerYAnchor.constraint(equalTo: container.centerYAnchor)
+        ])
+        let item = NSMenuItem()
+        item.view = container
+        return item
+    }
+
+    private func popupMenuItem(symbol: String, title: String, popup: NSPopUpButton) -> NSMenuItem {
+        let parent = NSMenuItem(title: "\(title)：\(popup.titleOfSelectedItem ?? "")", action: nil, keyEquivalent: "")
+        parent.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
+        parent.isEnabled = popup.isEnabled
+        let submenu = NSMenu()
+        for option in popup.itemArray {
+            let item = NSMenuItem(title: option.title, action: #selector(popupOptionSelected(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = option.tag
+            item.representedObject = popup
+            item.state = option === popup.selectedItem ? .on : .off
+            submenu.addItem(item)
+        }
+        parent.submenu = submenu
+        return parent
+    }
+
+    @objc private func popupOptionSelected(_ sender: NSMenuItem) {
+        guard let popup = sender.representedObject as? NSPopUpButton, let action = popup.action else { return }
+        popup.selectItem(withTag: sender.tag)
+        NSApp.sendAction(action, to: popup.target, from: popup)
+    }
+
+    private func modePresetMenuItem() -> NSMenuItem {
+        let parent = NSMenuItem(title: "灯光预设：\(modeButton.title)", action: nil, keyEquivalent: "")
+        parent.image = NSImage(systemSymbolName: "lightbulb", accessibilityDescription: "灯光预设")
+        let submenu = NSMenu()
+        for (index, title) in modeNames().enumerated() {
+            let item = NSMenuItem(title: title, action: #selector(presetChanged(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = index
+            if title == modeButton.title { item.state = .on }
+            submenu.addItem(item)
+        }
+        submenu.addItem(.separator())
+        let center = NSMenuItem(title: "模式中心设置…", action: #selector(showModeCenter), keyEquivalent: "")
+        center.target = self
+        submenu.addItem(center)
+        parent.submenu = submenu
+        return parent
+    }
+
+    private func rotationPresetMenuItem() -> NSMenuItem {
+        let preset = loadRotationPreset()
+        let parent = NSMenuItem(title: "旋转预设：\(preset.name)", action: nil, keyEquivalent: "")
+        parent.image = NSImage(systemSymbolName: "rotate.right", accessibilityDescription: "旋转预设")
+        parent.isEnabled = rotationModeButton.isEnabled || displayAutoPresetSwitch.isEnabled
+        let submenu = NSMenu()
+        submenu.autoenablesItems = false
+        let apply = NSMenuItem(title: "应用“\(preset.name)”", action: #selector(applyRotationPreset), keyEquivalent: "")
+        apply.target = self
+        apply.isEnabled = rotationModeButton.isEnabled
+        submenu.addItem(apply)
+        let save = NSMenuItem(title: "保存当前为旋转预设…", action: #selector(saveCurrentRotationPreset), keyEquivalent: "")
+        save.target = self
+        save.isEnabled = rotationModeButton.isEnabled
+        submenu.addItem(save)
+        submenu.addItem(.separator())
+        submenu.addItem(menuItem(for: displayAutoPresetSwitch, title: "连接 Studio Display 时自动启用"))
+        parent.submenu = submenu
+        return parent
     }
 
     @objc private func powerChanged() {
@@ -842,7 +991,7 @@ private final class StatusIndicator: NSObject {
     func updateDisplayAmbientProxy(_ value: Int?, sourceName: String) {
         currentDisplayAmbientProxy = value
         currentAmbientSourceName = sourceName
-        if popover.isShown { updateAmbientStatusLabel() }
+        if isMenuOpen { updateAmbientStatusLabel() }
     }
 
     @discardableResult
@@ -1509,7 +1658,7 @@ private final class StatusIndicator: NSObject {
             alert.runModal()
             return
         }
-        if !enabled { popover.performClose(nil) }
+        if !enabled { statusMenu.cancelTracking() }
         refreshControls()
     }
 
@@ -1636,7 +1785,7 @@ private final class StatusIndicator: NSObject {
         guard let builtin = displayController.builtinDisplay(), CGDisplayIsOnline(builtin) != 0 else { return }
         let current = Int(CGDisplayRotation(builtin).rounded())
         let next = current == 0 ? 90 : (current == 90 ? 270 : 0)
-        popover.performClose(nil)
+        statusMenu.cancelTracking()
         guard displayController.rotateBuiltin(to: next) else {
             log("内屏旋转失败，未进入确认流程")
             return
@@ -1883,152 +2032,6 @@ private final class StatusIndicator: NSObject {
         brightnessValueLabel.textColor = .secondaryLabelColor
         temperatureValueLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
         temperatureValueLabel.textColor = .secondaryLabelColor
-
-        let title = NSTextField(labelWithString: "iScreen Menu")
-        title.font = .systemFont(ofSize: 15, weight: .semibold)
-        let subtitle = NSTextField(labelWithString: "Screen and Light Controller")
-        subtitle.font = .systemFont(ofSize: 11)
-        subtitle.textColor = .secondaryLabelColor
-        let header = NSStackView(views: [title, subtitle])
-        header.orientation = .vertical
-        header.alignment = .leading
-        header.spacing = 2
-
-        let brightnessRow = sliderRow(symbol: "sun.max", title: "亮度", slider: brightnessSlider, valueLabel: brightnessValueLabel)
-        let temperatureRow = sliderRow(symbol: "thermometer.medium", title: "色温", slider: temperatureSlider, valueLabel: temperatureValueLabel)
-        let delayField = optionField(symbol: "clock", title: "离席时间", control: presenceDelayPopup)
-        let sensitivityField = optionField(symbol: "gauge", title: "侦测灵敏度", control: presenceSensitivityPopup)
-        let presenceOptions = NSStackView(views: [delayField, sensitivityField])
-        presenceOptions.orientation = .horizontal
-        presenceOptions.alignment = .top
-        presenceOptions.spacing = 12
-        delayField.widthAnchor.constraint(equalToConstant: 150).isActive = true
-        sensitivityField.widthAnchor.constraint(equalToConstant: 150).isActive = true
-
-        let featureTitle = sectionLabel("快捷控制")
-        let featureGrid = NSGridView(views: [
-            [powerSwitch, autoLightSwitch, presenceSwitch],
-            [videoModeSwitch, brightnessFollowSwitch, powerSyncSwitch],
-            [timeTemperatureSwitch, displayBrightnessLockSwitch, keepAwakeSwitch]
-        ])
-        featureGrid.rowSpacing = 6
-        featureGrid.columnSpacing = 6
-        featureGrid.xPlacement = .fill
-        for button in [powerSwitch, autoLightSwitch, presenceSwitch, videoModeSwitch, brightnessFollowSwitch, powerSyncSwitch, timeTemperatureSwitch, displayBrightnessLockSwitch, keepAwakeSwitch] {
-            button.widthAnchor.constraint(equalToConstant: 100).isActive = true
-            button.heightAnchor.constraint(equalToConstant: 40).isActive = true
-        }
-        let featureContainer = NSStackView(views: [featureTitle, featureGrid])
-        featureContainer.orientation = .vertical
-        featureContainer.alignment = .leading
-        featureContainer.spacing = UIStyle.sectionSpacing
-
-        let adjustmentTitle = sectionLabel("灯光调节")
-        let adjustmentContainer = NSStackView(views: [adjustmentTitle, brightnessRow, temperatureRow])
-        adjustmentContainer.orientation = .vertical
-        adjustmentContainer.alignment = .leading
-        adjustmentContainer.spacing = 8
-
-        let presetTitle = sectionLabel("灯光预设")
-        modeButton.widthAnchor.constraint(equalToConstant: UIStyle.contentWidth).isActive = true
-        modeButton.heightAnchor.constraint(equalToConstant: 34).isActive = true
-        let rotationPresetTitle = sectionLabel("旋转预设")
-        rotationModeButton.widthAnchor.constraint(equalToConstant: UIStyle.contentWidth).isActive = true
-        rotationModeButton.heightAnchor.constraint(equalToConstant: 34).isActive = true
-        let presetContainer = NSStackView(views: [presetTitle, modeButton, rotationPresetTitle, rotationModeButton])
-        presetContainer.orientation = .vertical
-        presetContainer.alignment = .leading
-        presetContainer.spacing = UIStyle.sectionSpacing
-
-        let presenceTitle = sectionLabel("入座检测设置")
-        let presenceContainer = NSStackView(views: [presenceTitle, presenceOptions])
-        presenceContainer.orientation = .vertical
-        presenceContainer.alignment = .leading
-        presenceContainer.spacing = UIStyle.sectionSpacing
-
-        let ambientTitle = sectionLabel("环境光标定")
-        let ambientEnableLabel = NSTextField(labelWithString: "启用")
-        ambientEnableLabel.font = UIStyle.bodyFont
-        ambientEnableLabel.textColor = .secondaryLabelColor
-        let ambientHeader = NSStackView(views: [ambientTitle, flexibleSpace(), ambientEnableLabel, ambientEnableSwitch])
-        ambientHeader.orientation = .horizontal
-        ambientHeader.alignment = .centerY
-        ambientHeader.spacing = 6
-        ambientHeader.widthAnchor.constraint(equalToConstant: UIStyle.contentWidth).isActive = true
-        for button in [captureBrightButton, captureDarkButton] {
-            button.widthAnchor.constraint(equalToConstant: 106).isActive = true
-            button.heightAnchor.constraint(equalToConstant: 40).isActive = true
-        }
-        for label in [brightThresholdLabel, darkThresholdLabel] {
-            label.widthAnchor.constraint(equalToConstant: 34).isActive = true
-        }
-        let brightCapture = NSStackView(views: [captureBrightButton, brightThresholdLabel])
-        brightCapture.orientation = .horizontal
-        brightCapture.alignment = .centerY
-        brightCapture.spacing = 4
-        let darkCapture = NSStackView(views: [captureDarkButton, darkThresholdLabel])
-        darkCapture.orientation = .horizontal
-        darkCapture.alignment = .centerY
-        darkCapture.spacing = 4
-        let ambientActions = NSStackView(views: [brightCapture, darkCapture])
-        ambientActions.orientation = .horizontal
-        ambientActions.alignment = .centerY
-        ambientActions.spacing = 12
-        ambientActions.widthAnchor.constraint(equalToConstant: UIStyle.contentWidth).isActive = true
-        ambientStatusLabel.widthAnchor.constraint(equalToConstant: UIStyle.contentWidth).isActive = true
-        let ambientContainer = NSStackView(views: [ambientHeader, ambientActions, ambientStatusLabel])
-        ambientContainer.orientation = .vertical
-        ambientContainer.alignment = .leading
-        ambientContainer.spacing = 6
-
-        let displayGrid = NSGridView(views: [[displayPowerSwitch, displayRotateButton], [studioPowerSwitch, NSView()]])
-        displayGrid.rowSpacing = 6
-        displayGrid.columnSpacing = 6
-        displayGrid.xPlacement = .fill
-        for button in [displayPowerSwitch, studioPowerSwitch, displayRotateButton] {
-            button.widthAnchor.constraint(equalToConstant: 153).isActive = true
-            button.heightAnchor.constraint(equalToConstant: 40).isActive = true
-        }
-        let displayTitle = sectionLabel("显示屏与旋转")
-        let displayContainer = NSStackView(views: [displayTitle, displayGrid])
-        displayContainer.orientation = .vertical
-        displayContainer.alignment = .leading
-        displayContainer.spacing = UIStyle.sectionSpacing
-
-        let autoPresetLabel = NSTextField(labelWithString: "启用预设")
-        autoPresetLabel.font = UIStyle.bodyFont
-        autoPresetLabel.textColor = .secondaryLabelColor
-        let rotationPresetHeader = NSStackView(views: [rotationPresetTitle, flexibleSpace(), autoPresetLabel, displayAutoPresetSwitch])
-        rotationPresetHeader.orientation = .horizontal
-        rotationPresetHeader.alignment = .centerY
-        rotationPresetHeader.spacing = 6
-        rotationPresetHeader.widthAnchor.constraint(equalToConstant: UIStyle.contentWidth).isActive = true
-        presetContainer.setViews([presetTitle, modeButton, rotationPresetHeader, rotationModeButton], in: .top)
-
-        let stack = NSStackView(views: [header, separator(), featureContainer, separator(), adjustmentContainer,
-                                       separator(), ambientContainer, separator(), presenceContainer, separator(), displayContainer,
-                                       separator(), presetContainer])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 8
-        stack.edgeInsets = NSEdgeInsets(top: 14, left: UIStyle.outerInset, bottom: 14, right: UIStyle.outerInset)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        for view in [brightnessRow, temperatureRow, presenceOptions] {
-            view.widthAnchor.constraint(equalToConstant: UIStyle.contentWidth).isActive = true
-        }
-
-        let controller = NSViewController()
-        controller.view = NSView(frame: NSRect(x: 0, y: 0, width: UIStyle.panelWidth, height: 626))
-        controller.view.addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: controller.view.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: controller.view.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: controller.view.topAnchor),
-            stack.bottomAnchor.constraint(lessThanOrEqualTo: controller.view.bottomAnchor)
-        ])
-        popover.contentViewController = controller
-        popover.contentSize = NSSize(width: UIStyle.panelWidth, height: 626)
-        popover.behavior = .transient
     }
 
     private func sliderRow(symbol: String, title: String, slider: NSSlider, valueLabel: NSTextField) -> NSStackView {
