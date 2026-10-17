@@ -1,49 +1,54 @@
 # iScreen Menu
-**Screen and Light Controller：灯光、双屏联动与 Mac 辅助控制，集中在菜单栏。**
+**菜单栏里的 BenQ iScreenBar 灯控：亮度、色温、自动感光，以及与 Studio Display 的熄屏同步和亮度跟随。**
 
-最初是为 Studio Display 补上 iScreenBar 熄屏同步，现在加入亮度联动、环境光规则、自动色温与内屏管理。非官方独立项目，与 BenQ、Apple 无隶属关系。最新版源码继续在这个原仓库以 MIT 许可证公开。
+<img src="docs/images/menu.png" alt="iScreen Menu 菜单面板" width="345"> <img src="docs/images/menu-bar-icon.png" alt="菜单栏图标" width="36">
+
+本仓库 fork 自 [rogerbush007-a11y/iScreenBar-StudioDisplay-Sync](https://github.com/rogerbush007-a11y/iScreenBar-StudioDisplay-Sync)，只保留与灯光相关的功能，并重做了菜单界面。非官方独立项目，与 BenQ、Apple 无隶属关系，以 MIT 许可证发布。
+
+## 本 fork 的改动
+
+- **原生菜单界面**：弹出气泡改为系统菜单；顶部为灯光面板，下方为原生子菜单与“退出”（⌘Q），自动适配浅色/深色模式。
+- **只保留灯光功能**：移除内屏开关与旋转、旋转预设、Studio Display 黑色遮罩、防止休眠、MacBook 与 Studio Display 双屏亮度锁定、锁屏时立即熄屏。App 不再请求管理员权限。
+- **菜单栏图标**：单色圆环，周围 8 条光芒按亮度依次点亮；同步异常时右下角显示小圆点。
+- **Studio Display 识别**：除型号 0xAE46 外，也识别 0xAE3A 及名称为 “Studio Display” 的屏幕；此前部分 Studio Display 无法识别，熄屏同步与亮度跟随不会生效。
+- **灯关闭时也可调节**：拖动亮度/色温或切换自动感光、应用灯光预设时先开灯再写入（灯关闭时固件会忽略这些指令）。
+- **稳定性**：菜单展开时同步与状态回读不中断；从菜单退出后不再被 LaunchAgent 自动拉起，仅在异常退出时重启；声明最低系统版本 macOS 14。
 
 ## 界面与功能
 
-详见 [截图使用指南](docs/UI-GUIDE.zh-CN.md) · [完整功能清单](docs/FEATURES.zh-CN.md)。
+详见 [界面使用指南](docs/UI-GUIDE.zh-CN.md) · [完整功能清单](docs/FEATURES.zh-CN.md)。
 
-| 模块 | 功能 |
+| 区域 | 功能 |
 | --- | --- |
-| 快捷控制 | 灯光、自动感光、入座检测、视频模式、亮度跟随、熄屏同步、自动色温、双屏亮度、防止休眠 |
-| 灯光调节 | 亮度与 2700–6500K 色温，支持物理操作后的状态回读 |
-| 亮度联动 | 保留当前亮度差，实现 MacBook ↔ Studio Display → iScreenBar 联动 |
-| 环境光标定 | 使用 Studio Display 传感器，分别保存明亮关灯、昏暗开灯阈值 |
-| 自动色温 | 按时间变化，白天偏冷、夜间偏暖；不是测量环境色温 |
-| 内屏管理 | 内屏开关、0°/90°/270° 旋转、5 秒确认回退、外屏断开恢复 |
-| Studio Display 按钮 | 黑色遮罩，保持窗口布局；**不关闭背光，不等同于硬件节电** |
-| 预设 | 保存灯光模式、按前台应用切换模式；独立保存旋转预设 |
+| 顶部 | 连接状态、当前亮度与色温；右侧圆形按钮开关灯 |
+| 滑块 | 亮度（白色填充）与 2700–6500K 色温（暖到冷渐变）；自动感光开启时亮度滑块置灰，自动色温开启时色温滑块置灰 |
+| 开关 | 自动感光、自动色温、入座检测、视频模式、亮度跟随、熄屏同步 |
+| 子菜单 | 入座检测设置（离席时间、灵敏度）、环境光标定、灯光预设与模式中心 |
 
-图标黄色表示灯亮，灰色表示灯灭，红色提示异常；悬停显示亮度和色温。App 不占 Dock 位置。
+App 不占 Dock 位置，悬停图标显示亮度和色温。
 
 ## 安装
 
-已测试：Apple Silicon MacBook Pro、macOS 26、Studio Display、BenQ iScreenBar（USB VID 0x04A5 / PID 0x2501）。其他系统和设备尚未全面验证。
+已测试：Apple Silicon Mac、macOS 26–27、Studio Display、BenQ iScreenBar（USB VID 0x04A5 / PID 0x2501）。其他系统和设备尚未全面验证；需要 macOS 14 或更高版本。
 
 先安装 Xcode Command Line Tools，然后运行：
 
 ```bash
 xcode-select --install
-git clone https://github.com/rogerbush007-a11y/iScreenBar-StudioDisplay-Sync.git
+git clone https://github.com/alexcding/iScreenBar-StudioDisplay-Sync.git
 cd iScreenBar-StudioDisplay-Sync
 ./scripts/install.sh
 ```
 
-脚本本机编译、临时签名，安装到 `~/Applications/iScreen Menu.app`，创建用户级 LaunchAgent，登录后自动运行。安装无需管理员密码；防止休眠的强制层另需管理员授权。
+脚本本机编译、临时签名，安装到 `~/Applications/iScreen Menu.app`，创建用户级 LaunchAgent，登录后自动运行。安装和使用都不需要管理员密码。
 
 日常灯控直接通过 USB HID 执行，不依赖官方 App。建议避免两个软件同时自动写入灯光设置。相机自动视频模式和灯体硬件记忆尚未完全对齐，不宣称完整替代官方所有功能。
 
 ## 使用规则
 
 - 亮度跟随与灯体自动感光互斥，关闭跟随后保留当前亮度。
-- 环境光采用近 10 秒中位数。明亮关灯约 30 秒，达到昏暗开灯点约 30 秒；环境关灯后的渐进回开约 45 秒。带回差与持续时间判断，不是越过数值就立即切换。
-- 旋转预设开启：连接 Studio Display 时应用保存角度。关闭：回到 0°，重新连接也请求保持 0°。
-- 外屏断开请求强制恢复内屏。一般显示配置操作避开锁屏/唤醒切换，断开恢复是例外。
-- 防止休眠使用 caffeinate 和管理员授权的 pmset disablesleep，关闭或退出后尝试释放。请实际验证本机合盖、锁屏与恢复行为。
+- 熄屏同步开启时，Studio Display 熄屏即关灯；希望熄屏后保持灯亮，请关闭“熄屏同步”。
+- 环境光采用近 10 秒中位数。明亮关灯约 30 秒，达到昏暗开灯点约 30 秒；环境关灯后的渐进回开约 45 秒。带回差与持续时间判断，不是越过数值就立即切换。环境光规则关灯期间，调节滑块不会重新开灯。
 
 ## 验证与限制
 
@@ -53,9 +58,7 @@ tail -f ~/Library/Logs/iScreenBarStudioSync.log
 launchctl print gui/$(id -u)/local.qiu.iScreenBarStudioSync
 ```
 
-2026-10-05 的“关闭内屏后拔掉外屏恢复”已由使用者实际确认；2026-10-06 的旋转预设关闭回 0°已构建部署，仍待新一轮插拔验收。构建通过、系统状态回读不代表面板确实发光。
-
-显示控制依赖 macOS 私有 SkyLight / MonitorPanel / DisplayServices 接口，系统升级后需要复测。USB 报文针对特定灯型，其他 ScreenBar 型号不保证兼容。虚拟分屏实验不属于当前正式功能。
+亮度读取使用 macOS 私有 DisplayServices 接口，系统升级后需要复测。USB 报文针对特定灯型，其他 ScreenBar 型号不保证兼容。构建通过、系统状态回读不代表面板确实发光。
 
 ## 卸载与开发
 
