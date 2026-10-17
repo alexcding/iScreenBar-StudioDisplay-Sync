@@ -439,6 +439,8 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
     private let brightnessSlider = InteractiveSlider(value: 50, minValue: 1, maxValue: 100, track: .brightness)
     private let temperatureSlider = InteractiveSlider(value: 5000, minValue: 2700, maxValue: 6500, track: .temperature)
     private let timeTemperatureSwitch = FeatureButton(title: L("Auto Color"), symbol: "circle.lefthalf.filled", accentColor: activeControlColor)
+    private let trueToneSwitch = FeatureButton(title: L("Auto Tone"), symbol: "circle.dashed.inset.filled", accentColor: activeControlColor)
+    private let trueToneReader = TrueToneReader()
     private let autoLightSwitch = FeatureButton(title: L("Auto Light"), symbol: "sun.max", accentColor: activeControlColor)
     private let presenceSwitch = FeatureButton(title: L("Presence"), symbol: "figure.seated.side", accentColor: activeControlColor)
     private let presenceDelayPopup = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -458,7 +460,16 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
     private let ambientStatusLabel = NSTextField(labelWithString: L("Ambient light not calibrated"))
     private(set) var isBrightnessFollowEnabled: Bool
     private(set) var isPowerSyncEnabled: Bool
-    private(set) var isTimeTemperatureEnabled: Bool
+    /// 自动色温（随时间）与自动色调（跟随原彩显示）都控制色温，只能开启其一。
+    enum AutoTemperatureMode: String {
+        case off
+        case time
+        case trueTone
+    }
+
+    private(set) var autoTemperatureMode: AutoTemperatureMode {
+        didSet { UserDefaults.standard.set(autoTemperatureMode.rawValue, forKey: "autoTemperatureMode") }
+    }
     private(set) var ambientCloseThreshold: Int?
     private(set) var ambientOpenThreshold: Int?
     private(set) var currentDisplayAmbientProxy: Int?
@@ -469,8 +480,10 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
     private var isAsleep: Bool
     private var autoLightChangePendingUntil: Date?
     private var pendingAutoLightState: Bool?
-    private var lastScheduledTemperature: Int?
-    private var lastScheduledTemperatureChangeAt = Date.distantPast
+    private var lastAutoTemperature: Int?
+    private var lastAutoTemperatureCheckAt = Date.distantPast
+    /// 前台应用绑定了模式时暂停自动色温，离开该应用后恢复。
+    private var isAutoTemperaturePausedForApp = false
     private var lastDragTemperatureSentAt = Date.distantPast
     private var lastDragBrightnessSentAt = Date.distantPast
     private var lastFrontmostBundleID: String?
@@ -485,7 +498,8 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         self.isAsleep = isAsleep
         isBrightnessFollowEnabled = UserDefaults.standard.bool(forKey: "brightnessFollowEnabled")
         isPowerSyncEnabled = UserDefaults.standard.object(forKey: "powerSyncEnabled") as? Bool ?? true
-        isTimeTemperatureEnabled = UserDefaults.standard.bool(forKey: "timeTemperatureEnabled")
+        autoTemperatureMode = UserDefaults.standard.string(forKey: "autoTemperatureMode")
+            .flatMap(AutoTemperatureMode.init(rawValue:)) ?? .off
         ambientCloseThreshold = UserDefaults.standard.object(forKey: "ambientCloseThreshold") as? Int
         ambientOpenThreshold = UserDefaults.standard.object(forKey: "ambientOpenThreshold") as? Int
         ambientThresholdSource = UserDefaults.standard.string(forKey: "ambientThresholdSource")
@@ -959,31 +973,55 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
     }
 
     @objc private func timeTemperatureChanged() {
-        isTimeTemperatureEnabled = timeTemperatureSwitch.state == .on
-        UserDefaults.standard.set(isTimeTemperatureEnabled, forKey: "timeTemperatureEnabled")
-        lastScheduledTemperature = nil
-        lastScheduledTemperatureChangeAt = .distantPast
-        refreshControls()
-        if isTimeTemperatureEnabled {
-            applyScheduledTemperatureIfNeeded(isAsleep: isAsleep, force: true)
-            log("已开启色温随时间")
-        } else {
-            log("已关闭色温随时间，保持当前色温")
-        }
+        setAutoTemperatureMode(timeTemperatureSwitch.state == .on ? .time : .off)
     }
 
-    func applyScheduledTemperatureIfNeeded(isAsleep: Bool, force: Bool = false) {
-        guard isTimeTemperatureEnabled,
+    @objc private func trueToneTemperatureChanged() {
+        setAutoTemperatureMode(trueToneSwitch.state == .on ? .trueTone : .off)
+    }
+
+    private func setAutoTemperatureMode(_ mode: AutoTemperatureMode) {
+        let previous = autoTemperatureMode
+        autoTemperatureMode = mode
+        isAutoTemperaturePausedForApp = false
+        lastAutoTemperature = nil
+        lastAutoTemperatureCheckAt = .distantPast
+        refreshControls()
+        switch mode {
+        case .time: log("已开启色温随时间")
+        case .trueTone: log("已开启色温跟随原彩显示")
+        case .off: log(previous == .trueTone ? "已关闭色温跟随原彩显示，保持当前色温" : "已关闭色温随时间，保持当前色温")
+        }
+        applyAutoTemperatureIfNeeded(isAsleep: isAsleep, force: true)
+    }
+
+    /// 自动色温（随时间）或自动色调（跟随显示器白点，含原彩显示与夜览）写入色温。
+    /// 先节流再读取：原彩显示白点每次读取都是一次跨进程调用，且两者都变化缓慢。
+    func applyAutoTemperatureIfNeeded(isAsleep: Bool, force: Bool = false) {
+        guard autoTemperatureMode != .off,
+              !isAutoTemperaturePausedForApp,
               !isAsleep,
               lamp.isConnected,
               lamp.isPowerOn == true else { return }
-        let target = scheduledTemperature(at: Date())
-        guard force || target != lastScheduledTemperature || lamp.currentTemperature != target else { return }
-        guard force || Date().timeIntervalSince(lastScheduledTemperatureChangeAt) >= 60 else { return }
+        let now = Date()
+        let interval: TimeInterval = autoTemperatureMode == .time ? 60 : 5
+        guard force || now.timeIntervalSince(lastAutoTemperatureCheckAt) >= interval else { return }
+        lastAutoTemperatureCheckAt = now
+        let target: Int
+        if autoTemperatureMode == .time {
+            target = scheduledTemperature(at: now)
+        } else {
+            guard let kelvin = trueToneReader.temperature() else { return }
+            // 读数落在取整边界附近时会来回跳动：与上次写入相差不足 75K 时保持不变。
+            if !force, let last = lastAutoTemperature, abs(kelvin - last) < 75,
+               lamp.currentTemperature.map({ $0 == last }) ?? true { return }
+            target = max(2700, min(6500, Int((Double(kelvin) / 100).rounded()) * 100))
+        }
+        // 两种来源都已量化（50K / 100K）；目标未变且灯仍是上次写入的值时不重复发送。
+        if !force, target == lastAutoTemperature, lamp.currentTemperature.map({ $0 == target }) ?? true { return }
         if lamp.setTemperature(target) {
-            lastScheduledTemperature = target
-            lastScheduledTemperatureChangeAt = Date()
-            log("色温随时间已调整为 \(target)K")
+            lastAutoTemperature = target
+            log(autoTemperatureMode == .time ? "色温随时间已调整为 \(target)K" : "色温跟随原彩显示已调整为 \(target)K")
         }
     }
 
@@ -1099,6 +1137,8 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         isBrightnessFollowEnabled = false
         brightnessFollowSwitch.state = .off
         UserDefaults.standard.set(false, forKey: "brightnessFollowEnabled")
+        // 手动选择的预设带有自己的色温，关闭自动色温以免随后被覆盖。
+        if autoTemperatureMode != .off { setAutoTemperatureMode(.off) }
         withLampOn("preset") { [weak self] in
             guard let self else { return }
             _ = self.lamp.setBrightness(preset.brightness)
@@ -1284,7 +1324,15 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         guard let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
               bundleID != lastFrontmostBundleID else { return }
         lastFrontmostBundleID = bundleID
-        guard let mode = loadAppModes()[bundleID] else { return }
+        guard let mode = loadAppModes()[bundleID] else {
+            if isAutoTemperaturePausedForApp {
+                isAutoTemperaturePausedForApp = false
+                log("已离开绑定模式的应用，恢复自动色温")
+                applyAutoTemperatureIfNeeded(isAsleep: isAsleep, force: true)
+            }
+            return
+        }
+        isAutoTemperaturePausedForApp = autoTemperatureMode != .off
         withLampOn("preset") { [weak self] in
             guard let self else { return }
             _ = self.lamp.setBrightness(mode.brightness)
@@ -1338,6 +1386,9 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         timeTemperatureSwitch.target = self
         timeTemperatureSwitch.action = #selector(timeTemperatureChanged)
         timeTemperatureSwitch.toolTip = L("Adjust color temperature automatically by time of day")
+        trueToneSwitch.target = self
+        trueToneSwitch.action = #selector(trueToneTemperatureChanged)
+        trueToneSwitch.toolTip = L("Match the lamp’s color temperature to the Studio Display’s True Tone")
         autoLightSwitch.target = self
         autoLightSwitch.action = #selector(autoLightChanged)
         autoLightSwitch.toolTip = L("Turn the lamp’s auto light sensor on or off")
@@ -1371,6 +1422,7 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         brightnessFollowSwitch.target = self
         brightnessFollowSwitch.action = #selector(brightnessFollowChanged)
         timeTemperatureSwitch.detail = L("By time of day")
+        trueToneSwitch.detail = L("Matches True Tone")
         brightnessFollowSwitch.detail = L("Tracks display")
         powerSyncSwitch.detail = L("Off on sleep")
         brightnessFollowSwitch.toolTip = L("Lamp brightness follows the Studio Display")
@@ -1426,8 +1478,8 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         let sliders = NSStackView(views: [brightnessSlider, temperatureSlider])
         sliders.orientation = .vertical
         sliders.spacing = 8
-        let toggles = toggleGrid([[autoLightSwitch, timeTemperatureSwitch], [presenceSwitch, videoModeSwitch],
-                                  [brightnessFollowSwitch, powerSyncSwitch]])
+        let toggles = toggleGrid([[autoLightSwitch, presenceSwitch], [timeTemperatureSwitch, trueToneSwitch],
+                                  [brightnessFollowSwitch, powerSyncSwitch], [videoModeSwitch]])
 
         // 入座检测、环境光标定与灯光预设属于设置项，放在下方的原生子菜单中。
         let stack = NSStackView(views: [header, sliders, toggles])
@@ -1453,8 +1505,10 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
 
     /// 开关卡片网格：每行等宽，两端与滑块边缘对齐，间距与滑块间距一致。
     private func toggleGrid(_ rows: [[FeatureButton]]) -> NSStackView {
+        // 按最多列数统一卡片宽度，单个卡片的末行不会拉伸到整行。
+        let columns = CGFloat(rows.map(\.count).max() ?? 1)
+        let width = (UIStyle.contentWidth - 8 * (columns - 1)) / columns
         let rowViews: [NSView] = rows.map { buttons in
-            let width = (UIStyle.contentWidth - 8 * CGFloat(buttons.count - 1)) / CGFloat(buttons.count)
             let tiles: [NSView] = buttons.map { button in
                 let background = FrostedBackground(cornerRadius: UIStyle.controlRadius)
                 button.translatesAutoresizingMaskIntoConstraints = false
@@ -1523,7 +1577,8 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         videoModeSwitch.state = lamp.isVideoModeEnabled == true ? .on : .off
         brightnessFollowSwitch.state = isBrightnessFollowEnabled ? .on : .off
         powerSyncSwitch.state = isPowerSyncEnabled ? .on : .off
-        timeTemperatureSwitch.state = isTimeTemperatureEnabled ? .on : .off
+        timeTemperatureSwitch.state = autoTemperatureMode == .time ? .on : .off
+        trueToneSwitch.state = autoTemperatureMode == .trueTone ? .on : .off
         updateAmbientStatusLabel()
         selectPresenceDelay(presenceDelaySeconds)
         presenceSensitivityPopup.selectItem(withTag: presenceSensitivity)
@@ -1556,8 +1611,9 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         autoLightSwitch.isEnabled = enabled && !isAmbientPresenceLockActive
         // 自动感光由灯体自行调节亮度，期间手动亮度无效，与自动色温时的色温滑块一致置灰。
         brightnessSlider.isEnabled = enabled && lamp.isAutoLightEnabled != true
-        temperatureSlider.isEnabled = enabled && !isTimeTemperatureEnabled
+        temperatureSlider.isEnabled = enabled && autoTemperatureMode == .off
         timeTemperatureSwitch.isEnabled = enabled
+        trueToneSwitch.isEnabled = enabled
         presenceSwitch.isEnabled = enabled && !isAmbientPresenceLockActive && !isScreenSleepPresenceLockActive
         videoModeSwitch.isEnabled = enabled
         powerSyncSwitch.isEnabled = enabled
@@ -1853,6 +1909,45 @@ private final class DisplayBrightnessReader {
         var value: Float = 0
         guard getter(displayID, &value) == 0 else { return nil }
         return Int((max(0, min(1, value)) * 100).rounded())
+    }
+}
+
+/// 通过 CoreBrightness 私有接口读取显示器当前的目标白点，并换算为色温。
+/// 该白点包含原彩显示与夜览的调整；两者都关闭时为显示器原生白点（约 6500K）。
+private final class TrueToneReader {
+    private let client: NSObject?
+    private var hasLoggedReadFailure = false
+
+    init() {
+        if dlopen("/System/Library/PrivateFrameworks/CoreBrightness.framework/CoreBrightness", RTLD_LAZY) == nil {
+            log("无法加载 CoreBrightness，自动色调不可用")
+        }
+        client = (NSClassFromString("BrightnessSystemClient") as? NSObject.Type)?.init()
+        if client == nil { log("找不到 BrightnessSystemClient，自动色调不可用") }
+    }
+
+    /// 无法读取时返回 nil；返回未取整的色温，由调用方取整并限制在灯具范围内。
+    func temperature() -> Int? {
+        let selector = NSSelectorFromString("copyPropertyForKey:")
+        guard let client, client.responds(to: selector),
+              let ramp = client.perform(selector, with: "ColorRamp")?.takeRetainedValue() as? [String: Any],
+              let whitePoint = ramp["ColorRampWhitePointTarget"] as? [NSNumber], whitePoint.count == 2,
+              whitePoint[1].doubleValue != 0.1858 else {
+            if !hasLoggedReadFailure {
+                hasLoggedReadFailure = true
+                log("无法读取显示器白点，自动色调暂不调整")
+            }
+            return nil
+        }
+        if hasLoggedReadFailure {
+            hasLoggedReadFailure = false
+            log("已恢复读取显示器白点")
+        }
+        let x = whitePoint[0].doubleValue
+        let y = whitePoint[1].doubleValue
+        // McCamy 近似：由 CIE 1931 xy 色度坐标估算相关色温。
+        let n = (x - 0.3320) / (0.1858 - y)
+        return Int(449 * n * n * n + 3525 * n * n + 6823.3 * n + 5520.33)
     }
 }
 
@@ -2244,7 +2339,7 @@ private func pollDisplayAndLamp() {
         wasAsleep = isAsleep
     }
 
-    statusIndicator.applyScheduledTemperatureIfNeeded(isAsleep: isAsleep)
+    statusIndicator.applyAutoTemperatureIfNeeded(isAsleep: isAsleep)
 
     if brightnessFollowEnabled, !isAsleep, let displayID,
        let displayBrightness = displayBrightnessReader.percent(for: displayID) {

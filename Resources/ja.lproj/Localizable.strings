@@ -74,3 +74,6 @@
 "Video Mode" = "ビデオモード";
 "Wind Down" = "就寝前";
 "iScreenBar brightness %d%%" = "iScreenBar 明るさ %d%%";
+"Auto Tone" = "自動トーン";
+"Matches True Tone" = "True Toneに連動";
+"Match the lamp’s color temperature to the Studio Display’s True Tone" = "ライトの色温度を Studio Display の True Tone に合わせる";

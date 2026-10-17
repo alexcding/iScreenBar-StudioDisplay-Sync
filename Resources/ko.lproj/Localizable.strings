@@ -74,3 +74,6 @@
 "Video Mode" = "비디오 모드";
 "Wind Down" = "취침 전";
 "iScreenBar brightness %d%%" = "iScreenBar 밝기 %d%%";
+"Auto Tone" = "자동 톤";
+"Matches True Tone" = "True Tone 연동";
+"Match the lamp’s color temperature to the Studio Display’s True Tone" = "조명 색온도를 Studio Display의 True Tone에 맞춤";

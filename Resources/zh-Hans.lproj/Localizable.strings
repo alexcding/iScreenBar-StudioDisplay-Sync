@@ -74,3 +74,6 @@
 "Video Mode" = "视频模式";
 "Wind Down" = "睡前放松";
 "iScreenBar brightness %d%%" = "iScreenBar 亮度 %d%%";
+"Auto Tone" = "自动色调";
+"Matches True Tone" = "跟随原彩显示";
+"Match the lamp’s color temperature to the Studio Display’s True Tone" = "让灯的色温与 Studio Display 的原彩显示一致";
