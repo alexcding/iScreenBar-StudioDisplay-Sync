@@ -32,7 +32,8 @@ escaped_log=${log_file//&/&amp;}
   print "<string>$escaped_executable/Contents/MacOS/iScreenBarStudioSync</string>"
   print '</array>'
   print '<key>RunAtLoad</key><true/>'
-  print '<key>KeepAlive</key><true/>'
+  # 仅在异常退出时重启；从菜单退出后保持退出。
+  print '<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>'
   print "<key>StandardOutPath</key><string>$escaped_log</string>"
   print "<key>StandardErrorPath</key><string>$escaped_log</string>"
   print '</dict></plist>'

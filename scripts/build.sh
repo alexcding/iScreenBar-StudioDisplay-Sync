@@ -10,6 +10,7 @@ executable_dir="$app_dir/Contents/MacOS"
 mkdir -p "$executable_dir"
 
 xcrun swiftc -O \
+  -target "$(uname -m)-apple-macos14.0" \
   -framework AppKit \
   -framework CoreGraphics \
   -framework IOKit \

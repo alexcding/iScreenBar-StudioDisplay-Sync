@@ -9,7 +9,8 @@ import UniformTypeIdentifiers
 private let benqVendorID = 0x04A5
 private let iScreenBarProductID = 0x2501
 private let appleDisplayVendorID: UInt32 = 0x0610
-private let studioDisplayProductID: UInt32 = 0xAE46
+/// Studio Display 不同批次的型号编号不同；未收录的型号再按屏幕名称识别。
+private let studioDisplayProductIDs: Set<UInt32> = [0xAE46, 0xAE3A]
 private let pollInterval: TimeInterval = 0.25
 
 private func log(_ message: String) {
@@ -20,123 +21,192 @@ private func log(_ message: String) {
 
 private let activeControlColor = NSColor.controlAccentColor
 
-private func requestSystemDisplaySleep() -> Bool {
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
-    process.arguments = ["displaysleepnow"]
-    process.standardOutput = FileHandle.nullDevice
-    process.standardError = FileHandle.nullDevice
-    do {
-        try process.run()
-        process.waitUntilExit()
-        return process.terminationStatus == 0
-    } catch {
-        log("无法请求系统关闭显示器：\(error.localizedDescription)")
-        return false
-    }
-}
-
-private func requestSystemDisplayWake() -> Bool {
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
-    process.arguments = ["-u", "-t", "2"]
-    process.standardOutput = FileHandle.nullDevice
-    process.standardError = FileHandle.nullDevice
-    do {
-        try process.run()
-        return true
-    } catch {
-        log("无法请求系统点亮显示器：\(error.localizedDescription)")
-        return false
-    }
-}
-
 private enum UIStyle {
-    static let panelWidth: CGFloat = 344
-    static let contentWidth: CGFloat = 312
+    static let panelWidth: CGFloat = 300
+    static let contentWidth: CGFloat = 268
     static let outerInset: CGFloat = 16
     static let sectionSpacing: CGFloat = 8
     static let bodyFont = NSFont.systemFont(ofSize: 12, weight: .regular)
     static let controlFont = NSFont.systemFont(ofSize: 12, weight: .medium)
     static let captionFont = NSFont.systemFont(ofSize: 11, weight: .medium)
     static let iconSize: CGFloat = 15
+    static let controlHeight: CGFloat = 46
+    static let controlRadius: CGFloat = 12
+    static let chipOffColor = adaptiveColor(light: NSColor(white: 0, alpha: 0.08), dark: NSColor(white: 1, alpha: 0.14))
 }
 
-private final class HighlightSliderCell: NSSliderCell {
-    let activeColor: NSColor
-    var isInteracting = false
+private func adaptiveColor(light: NSColor, dark: NSColor) -> NSColor {
+    NSColor(name: nil) { $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light }
+}
 
-    init(activeColor: NSColor) {
-        self.activeColor = activeColor
-        super.init()
-    }
-
-    required init(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    override func drawBar(inside rect: NSRect, flipped: Bool) {
-        guard isInteracting else {
-            super.drawBar(inside: rect, flipped: flipped)
-            return
-        }
-        let track = NSRect(x: rect.minX, y: rect.midY - 2, width: rect.width, height: 4)
-        activeColor.withAlphaComponent(0.82).setFill()
-        NSBezierPath(roundedRect: track, xRadius: 2, yRadius: 2).fill()
+/// 将模板图像按指定颜色着色，绘制时才解析颜色，可随外观变化。
+private func tintedImage(_ image: NSImage, color: NSColor) -> NSImage {
+    NSImage(size: image.size, flipped: false) { rect in
+        image.draw(in: rect)
+        color.set()
+        rect.fill(using: .sourceAtop)
+        return true
     }
 }
 
+/// 胶囊滑块：亮度为白色填充，色温为暖到冷渐变加细长标记，均无圆形滑钮。
 private final class InteractiveSlider: NSSlider {
-    private let activeColor: NSColor
-    private let highlightCell: HighlightSliderCell
+    enum Track {
+        case brightness
+        case temperature
+    }
 
-    init(value: Double, minValue: Double, maxValue: Double, activeColor: NSColor) {
-        self.activeColor = activeColor
-        highlightCell = HighlightSliderCell(activeColor: activeColor)
+    private let track: Track
+
+    init(value: Double, minValue: Double, maxValue: Double, track: Track) {
+        self.track = track
         super.init(frame: .zero)
-        cell = highlightCell
         self.minValue = minValue
         self.maxValue = maxValue
         self.doubleValue = value
-        wantsLayer = true
-        layer?.cornerRadius = 7
     }
 
     required init?(coder: NSCoder) { nil }
 
+    override var intrinsicContentSize: NSSize { NSSize(width: NSView.noIntrinsicMetric, height: 30) }
+
+    override var doubleValue: Double {
+        didSet { needsDisplay = true }
+    }
+
+    override var isEnabled: Bool {
+        didSet { needsDisplay = true }
+    }
+
+    private var fraction: CGFloat {
+        guard maxValue > minValue else { return 0 }
+        return CGFloat((doubleValue - minValue) / (maxValue - minValue))
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let bar = bounds
+        let radius = bar.height / 2
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current?.cgContext.setAlpha(isEnabled ? 1 : 0.45)
+        NSBezierPath(roundedRect: bar, xRadius: radius, yRadius: radius).addClip()
+        switch track {
+        case .brightness:
+            // 与控制中心的显示器亮度一致：浅灰轨道，左侧白色填充，内嵌太阳图标，无滑钮。
+            UIStyle.chipOffColor.setFill()
+            bar.fill()
+            let fillWidth = max(bar.height, bar.width * fraction)
+            NSColor.white.setFill()
+            NSBezierPath(roundedRect: NSRect(x: bar.minX, y: bar.minY, width: fillWidth, height: bar.height),
+                         xRadius: radius, yRadius: radius).fill()
+            if let icon = NSImage(systemSymbolName: "sun.max.fill", accessibilityDescription: nil)?
+                .withSymbolConfiguration(.init(pointSize: 12, weight: .semibold)) {
+                let iconRect = NSRect(x: bar.minX + 9, y: bar.midY - icon.size.height / 2,
+                                      width: icon.size.width, height: icon.size.height)
+                tintedImage(icon, color: NSColor(white: 0.45, alpha: 1)).draw(in: iconRect)
+            }
+        case .temperature:
+            // 暖到冷渐变，当前位置用细长白色标记表示。
+            let colors = [
+                NSColor(srgbRed: 1, green: 0.62, blue: 0.25, alpha: 1),
+                NSColor(srgbRed: 1, green: 0.91, blue: 0.78, alpha: 1),
+                NSColor(srgbRed: 0.85, green: 0.91, blue: 1, alpha: 1),
+                NSColor(srgbRed: 0.61, green: 0.76, blue: 1, alpha: 1)
+            ]
+            NSGradient(colors: colors, atLocations: [0, 0.48, 0.72, 1], colorSpace: .sRGB)?.draw(in: bar, angle: 0)
+            let markerWidth: CGFloat = 5
+            let marker = NSRect(x: bar.minX + 8 + fraction * (bar.width - markerWidth - 16), y: bar.minY + 6,
+                                width: markerWidth, height: bar.height - 12)
+            NSGraphicsContext.saveGraphicsState()
+            let shadow = NSShadow()
+            shadow.shadowColor = NSColor.black.withAlphaComponent(0.3)
+            shadow.shadowBlurRadius = 2
+            shadow.shadowOffset = NSSize(width: 0, height: -0.5)
+            shadow.set()
+            NSColor.white.setFill()
+            NSBezierPath(roundedRect: marker, xRadius: markerWidth / 2, yRadius: markerWidth / 2).fill()
+            NSGraphicsContext.restoreGraphicsState()
+        }
+        let outline = NSBezierPath(roundedRect: bar.insetBy(dx: 0.25, dy: 0.25), xRadius: radius, yRadius: radius)
+        outline.lineWidth = 0.5
+        NSColor.black.withAlphaComponent(0.08).setStroke()
+        outline.stroke()
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    /// 拖动期间为 true，状态刷新不应覆盖用户正在拖动的值。
+    private(set) var isTracking = false
+
+    // 自行跟踪拖动，使整条胶囊都可点按；松开时才发送 action。
     override func mouseDown(with event: NSEvent) {
-        highlightCell.isInteracting = true
-        needsDisplay = true
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.12
-            layer?.backgroundColor = activeColor.withAlphaComponent(0.14).cgColor
+        guard isEnabled else { return }
+        isTracking = true
+        defer { isTracking = false }
+        func update(with event: NSEvent) {
+            let point = convert(event.locationInWindow, from: nil)
+            // 色温标记绘制时左右各内缩 8 pt 并以标记中心定位，命中区域与之一致。
+            let inset: CGFloat = track == .temperature ? 10.5 : 0
+            let position = min(max((point.x - inset) / max(bounds.width - inset * 2, 1), 0), 1)
+            doubleValue = minValue + Double(position) * (maxValue - minValue)
+            if isContinuous { sendAction(action, to: target) }
         }
-        super.mouseDown(with: event)
-        highlightCell.isInteracting = false
-        needsDisplay = true
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.18
-            layer?.backgroundColor = NSColor.clear.cgColor
+        update(with: event)
+        while let next = window?.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+            update(with: next)
+            if next.type == .leftMouseUp { break }
         }
+        sendAction(action, to: target)
     }
 }
 
-private func displayPowerIcon() -> NSImage {
-    let size = NSSize(width: 21, height: 18)
-    let image = NSImage(size: size, flipped: false) { rect in
-        let displayConfig = NSImage.SymbolConfiguration(pointSize: 17, weight: .regular)
-        let powerConfig = NSImage.SymbolConfiguration(pointSize: 7, weight: .semibold)
-        let display = NSImage(systemSymbolName: "display", accessibilityDescription: "内屏开关")?
-            .withSymbolConfiguration(displayConfig)
-        let power = NSImage(systemSymbolName: "power", accessibilityDescription: nil)?
-            .withSymbolConfiguration(powerConfig)
-        display?.draw(in: rect)
-        power?.draw(in: NSRect(x: 7, y: 6, width: 7, height: 7))
+/// 菜单栏图标：空心圆环常亮，周围 8 条光芒从正上方顺时针按亮度依次点亮。
+/// 同步异常时在右下角加一个小圆点提示。
+private func brightnessStatusIcon(level: Int, warning: Bool) -> NSImage {
+    let litDots = Int((Double(min(max(level, 0), 100)) / 100 * 8).rounded(.up))
+    let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
+        let center = NSPoint(x: rect.midX, y: rect.midY)
+        let ring = NSBezierPath(ovalIn: NSRect(x: center.x - 3.6, y: center.y - 3.6, width: 7.2, height: 7.2))
+        ring.lineWidth = 1.5
+        NSColor.black.setStroke()
+        ring.stroke()
+        for index in 0..<8 {
+            let angle = CGFloat.pi / 2 - CGFloat(index) * .pi / 4
+            let ray = NSBezierPath()
+            ray.move(to: NSPoint(x: center.x + 6.2 * cos(angle), y: center.y + 6.2 * sin(angle)))
+            ray.line(to: NSPoint(x: center.x + 7.3 * cos(angle), y: center.y + 7.3 * sin(angle)))
+            ray.lineWidth = 1.6
+            ray.lineCapStyle = .round
+            NSColor.black.withAlphaComponent(index < litDots ? 1 : 0.25).setStroke()
+            ray.stroke()
+        }
+        if warning {
+            let badge = NSRect(x: rect.maxX - 6.5, y: rect.minY + 0.5, width: 6, height: 6)
+            NSGraphicsContext.current?.compositingOperation = .clear
+            NSBezierPath(ovalIn: badge.insetBy(dx: -1.2, dy: -1.2)).fill()
+            NSGraphicsContext.current?.compositingOperation = .sourceOver
+            NSColor.black.setFill()
+            NSBezierPath(ovalIn: badge).fill()
+        }
         return true
     }
     image.isTemplate = true
+    image.accessibilityDescription = "iScreenBar 亮度 \(level)%" + (warning ? "，同步异常" : "")
     return image
 }
 
+/// 控制中心样式的开关：圆形按钮，或带圆形图标、标题与说明的卡片。
 private final class FeatureButton: NSButton {
+    enum Style {
+        case circle
+        case tile
+    }
+
+    var style: Style = .tile {
+        didSet { needsDisplay = true }
+    }
+    /// 开启时显示在标题下方的简短说明；关闭时只显示标题。
+    var detail: String? {
+        didSet { if detail != oldValue { needsDisplay = true } }
+    }
     private let accentColor: NSColor
 
     init(title: String, symbol: String, accentColor: NSColor) {
@@ -144,159 +214,119 @@ private final class FeatureButton: NSButton {
         super.init(frame: .zero)
         self.title = title
         image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
-        imagePosition = .imageLeading
-        imageHugsTitle = true
-        font = UIStyle.controlFont
-        alignment = .center
         setButtonType(.toggle)
         isBordered = false
-        wantsLayer = true
-        layer?.cornerRadius = 10
-        layer?.cornerCurve = .continuous
-        layer?.masksToBounds = false
-        layer?.shadowOffset = NSSize(width: 0, height: -1)
-        layer?.shadowRadius = 6
         focusRingType = .none
-        updateAppearance()
     }
 
     required init?(coder: NSCoder) { nil }
 
+    override var isFlipped: Bool { true }
+
+    // 按钮自身绘制，不让符号图像的对齐边距影响布局位置。
+    override var alignmentRectInsets: NSEdgeInsets { NSEdgeInsetsZero }
+
     override var state: NSControl.StateValue {
-        didSet { updateAppearance() }
+        didSet { needsDisplay = true }
     }
 
-    override func updateLayer() {
-        super.updateLayer()
-        updateAppearance()
+    override var title: String {
+        didSet { needsDisplay = true }
     }
 
-    private func updateAppearance() {
-        guard let layer else { return }
-        let foregroundColor: NSColor = state == .on ? .white : .black
-        let titleAttributes: [NSAttributedString.Key: Any] = [
-            .font: UIStyle.controlFont,
-            .foregroundColor: foregroundColor
-        ]
-        attributedTitle = NSAttributedString(string: title, attributes: titleAttributes)
-        if state == .on {
-            layer.backgroundColor = accentColor.withAlphaComponent(0.88).cgColor
-            layer.borderColor = accentColor.cgColor
-            layer.shadowColor = accentColor.withAlphaComponent(0.18).cgColor
-            layer.shadowOpacity = 1
-            contentTintColor = .white
-        } else {
-            layer.backgroundColor = NSColor.black.withAlphaComponent(0.045).cgColor
-            layer.borderColor = NSColor.black.withAlphaComponent(0.09).cgColor
-            layer.shadowColor = NSColor.clear.cgColor
-            layer.shadowOpacity = 0
-            contentTintColor = .black
+    override var isEnabled: Bool {
+        didSet { needsDisplay = true }
+    }
+
+    override var isHighlighted: Bool {
+        didSet { needsDisplay = true }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current?.cgContext.setAlpha(isEnabled ? 1 : 0.4)
+        let isOn = state == .on
+        let foreground: NSColor = isOn ? .white : .labelColor
+        switch style {
+        case .circle:
+            fill(NSBezierPath(ovalIn: bounds), isOn: isOn)
+            drawIcon(centeredAt: NSPoint(x: bounds.midX, y: bounds.midY),
+                     pointSize: (bounds.height * 0.4).rounded(), color: foreground)
+        case .tile:
+            let chip = NSRect(x: 9, y: (bounds.height - 28) / 2, width: 28, height: 28)
+            fill(NSBezierPath(ovalIn: chip), isOn: isOn)
+            drawIcon(centeredAt: NSPoint(x: chip.midX, y: chip.midY), pointSize: 13, color: foreground)
+            let textX = chip.maxX + 8
+            let textWidth = bounds.width - textX - 6
+            let note = isOn ? detail : nil
+            let titleY = note == nil ? (bounds.height - 15) / 2 : (bounds.height - 29) / 2
+            drawText(title, in: NSRect(x: textX, y: titleY, width: textWidth, height: 15),
+                     font: .systemFont(ofSize: 12, weight: .semibold), color: .labelColor)
+            if let note {
+                drawText(note, in: NSRect(x: textX, y: titleY + 15, width: textWidth, height: 14),
+                         font: .systemFont(ofSize: 11), color: .secondaryLabelColor)
+            }
         }
-        layer.borderWidth = 0.5
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    private func fill(_ shape: NSBezierPath, isOn: Bool) {
+        (isOn ? accentColor : UIStyle.chipOffColor).setFill()
+        shape.fill()
+        if isHighlighted {
+            NSColor.black.withAlphaComponent(0.12).setFill()
+            shape.fill()
+        }
+    }
+
+    private func drawText(_ text: String, in rect: NSRect, font: NSFont, color: NSColor) {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingTail
+        (text as NSString).draw(in: rect, withAttributes: [.font: font, .foregroundColor: color, .paragraphStyle: paragraph])
+    }
+
+    private func drawIcon(centeredAt center: NSPoint, pointSize: CGFloat, color: NSColor) {
+        guard let image else { return }
+        let icon = image.withSymbolConfiguration(.init(pointSize: pointSize, weight: .medium)) ?? image
+        let iconRect = NSRect(x: center.x - icon.size.width / 2, y: center.y - icon.size.height / 2,
+                              width: icon.size.width, height: icon.size.height)
+        tintedImage(icon, color: color)
+            .draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
     }
 }
 
-/// 复刻 NotchNotes 的双层防休眠：caffeinate 负责空闲断言，
-/// pmset disablesleep 负责合盖等强制休眠路径。两者都绑定当前 App PID。
-private final class KeepAwakeController {
-    private var caffeinateProcess: Process?
-    private var sleepGuardProcess: Process?
-    private var readyFileURL: URL?
-    private var stopFileURL: URL?
-
-    var isActive: Bool {
-        caffeinateProcess?.isRunning == true &&
-            (sleepGuardProcess?.isRunning == true || readyFileURL.map {
-                FileManager.default.fileExists(atPath: $0.path)
-            } == true)
+/// 圆角磨砂背景：模糊窗口后方内容，用作开关卡片的底。
+private final class FrostedBackground: NSVisualEffectView {
+    init(cornerRadius: CGFloat) {
+        super.init(frame: .zero)
+        material = .popover
+        blendingMode = .behindWindow
+        state = .active
+        let side = cornerRadius * 2 + 1
+        let mask = NSImage(size: NSSize(width: side, height: side), flipped: false) { rect in
+            NSColor.black.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: cornerRadius, yRadius: cornerRadius).fill()
+            return true
+        }
+        mask.capInsets = NSEdgeInsets(top: cornerRadius, left: cornerRadius, bottom: cornerRadius, right: cornerRadius)
+        mask.resizingMode = .stretch
+        maskImage = mask
     }
 
-    @discardableResult
-    func setActive(_ active: Bool) -> Bool {
-        if active {
-            guard !isActive else { return true }
-            setActive(false)
+    required init?(coder: NSCoder) { nil }
+}
 
-            let token = UUID().uuidString
-            let base = "iScreenBar-KeepAwake-\(ProcessInfo.processInfo.processIdentifier)-\(token)"
-            let temporaryDirectory = FileManager.default.temporaryDirectory
-            let ready = temporaryDirectory.appendingPathComponent(base).appendingPathExtension("ready")
-            let stop = temporaryDirectory.appendingPathComponent(base).appendingPathExtension("stop")
-            let pid = ProcessInfo.processInfo.processIdentifier
-            let readyPath = Self.shellQuote(ready.path)
-            let stopPath = Self.shellQuote(stop.path)
-            let command = [
-                "owned=0",
-                "cleanup() { if [ \"$owned\" = 1 ]; then /usr/bin/pmset -a disablesleep 0; fi; /bin/rm -f \(readyPath) \(stopPath); }",
-                "trap cleanup 0",
-                "trap 'exit 1' 1 2 15",
-                "if ! /usr/bin/pmset -g | /usr/bin/grep -Eq 'SleepDisabled[[:space:]]+1'; then /usr/bin/pmset -a disablesleep 1 || exit 1; owned=1; fi",
-                "/usr/bin/pmset -g | /usr/bin/grep -Eq 'SleepDisabled[[:space:]]+1' || exit 1",
-                "/usr/bin/touch \(readyPath) || exit 1",
-                "while /bin/kill -0 \(pid) 2>/dev/null && [ ! -e \(stopPath) ]; do /bin/sleep 1; done"
-            ].joined(separator: "; ")
-            let escaped = command.replacingOccurrences(of: "\\", with: "\\\\")
-                .replacingOccurrences(of: "\"", with: "\\\"")
-            let appleScript = "with timeout of 2147483647 seconds\n do shell script \"\(escaped)\" with administrator privileges\nend timeout"
-
-            let guardProcess = Process()
-            guardProcess.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-            guardProcess.arguments = ["-e", appleScript]
-            guardProcess.standardOutput = FileHandle.nullDevice
-            guardProcess.standardError = FileHandle.nullDevice
-
-            let caffeinate = Process()
-            caffeinate.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
-            // 阻止系统、磁盘和空闲休眠，但允许显示器正常熄灭。
-            caffeinate.arguments = ["-ims", "-w", String(pid)]
-            do {
-                try guardProcess.run()
-                try caffeinate.run()
-                sleepGuardProcess = guardProcess
-                caffeinateProcess = caffeinate
-                readyFileURL = ready
-                stopFileURL = stop
-                guardProcess.terminationHandler = { [weak self] _ in
-                    DispatchQueue.main.async {
-                        guard let self,
-                              self.readyFileURL == ready,
-                              !FileManager.default.fileExists(atPath: ready.path) else { return }
-                        if let caffeinate = self.caffeinateProcess, caffeinate.isRunning {
-                            caffeinate.terminate()
-                        }
-                        self.caffeinateProcess = nil
-                        self.sleepGuardProcess = nil
-                        self.readyFileURL = nil
-                        self.stopFileURL = nil
-                        log("防止休眠授权被取消或启动失败")
-                    }
-                }
-                return true
-            } catch {
-                if guardProcess.isRunning { guardProcess.terminate() }
-                if caffeinate.isRunning { caffeinate.terminate() }
-                try? FileManager.default.removeItem(at: ready)
-                try? FileManager.default.removeItem(at: stop)
-                log("无法启动防止休眠：\(error.localizedDescription)")
-                return false
-            }
-        }
-
-        if let stopFileURL {
-            FileManager.default.createFile(atPath: stopFileURL.path, contents: Data())
-        }
-        if let caffeinateProcess, caffeinateProcess.isRunning { caffeinateProcess.terminate() }
-        caffeinateProcess = nil
-        sleepGuardProcess = nil
-        readyFileURL = nil
-        stopFileURL = nil
-        return true
+/// 标题旁的连接状态圆点。
+private final class StatusDot: NSView {
+    var color: NSColor = .systemGreen {
+        didSet { needsDisplay = true }
     }
 
-    deinit { _ = setActive(false) }
+    override var intrinsicContentSize: NSSize { NSSize(width: 6, height: 6) }
 
-    private static func shellQuote(_ value: String) -> String {
-        "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
+    override func draw(_ dirtyRect: NSRect) {
+        color.setFill()
+        NSBezierPath(ovalIn: bounds).fill()
     }
 }
 
@@ -375,258 +405,28 @@ private struct SavedMode: Codable {
     let videoMode: Bool
 }
 
-private struct DisplayPreset: Codable {
-    var name: String
-    var builtinEnabled: Bool
-    var rotation: Int
-    var builtinPrimary: Bool
-}
-
-private final class BlackDisplayView: NSView {
-    var restore: (() -> Void)?
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-    override func mouseDown(with event: NSEvent) {
-        if event.clickCount >= 2 { restore?() }
-    }
-    override func draw(_ dirtyRect: NSRect) {
-        NSColor.black.setFill()
-        dirtyRect.fill()
-    }
-}
-
-private final class DisplayController {
-    private var studioCover: NSWindow?
-    var isStudioCovered: Bool { studioCover != nil }
-
-    func studioTarget() -> CGDirectDisplayID? {
-        return NSScreen.screens.first {
-            $0.localizedName.replacingOccurrences(of: " ", with: "").lowercased().contains("studiodisplay")
-        }.flatMap { ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value }
-    }
-
-    func lidClosed() -> Bool {
-        let root = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"))
-        guard root != 0 else { return true }
-        defer { IOObjectRelease(root) }
-        return (IORegistryEntryCreateCFProperty(root, "AppleClamshellState" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? Bool) ?? true
-    }
-
-    func setStudioEnabled(_ enabled: Bool) -> Bool {
-        if enabled {
-            studioCover?.orderOut(nil)
-            studioCover = nil
-            return true
-        }
-        guard let id = studioTarget(), let screen = NSScreen.screens.first(where: {
-            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == id
-        }) else { return false }
-        if studioCover != nil { return true }
-        // 仅绘制遮罩，不更改显示器电源、亮度、分辨率、主屏和窗口布局。
-        let cover = NSWindow(contentRect: screen.frame, styleMask: .borderless, backing: .buffered, defer: false)
-        cover.backgroundColor = .black
-        cover.isOpaque = true
-        cover.hasShadow = false
-        cover.isReleasedWhenClosed = false
-        cover.level = .statusBar
-        cover.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
-        let view = BlackDisplayView(frame: NSRect(origin: .zero, size: screen.frame.size))
-        view.restore = { [weak self] in _ = self?.setStudioEnabled(true) }
-        cover.contentView = view
-        studioCover = cover
-        cover.orderFrontRegardless()
-        return true
-    }
-    private typealias GetDisplayList = @convention(c) (UInt32, UnsafeMutablePointer<CGDirectDisplayID>?, UnsafeMutablePointer<UInt32>?) -> CGError
-    private typealias ConfigureEnabled = @convention(c) (CGDisplayConfigRef?, CGDirectDisplayID, Bool) -> CGError
-    private let skyLightHandle: UnsafeMutableRawPointer?
-    private let monitorPanelHandle: UnsafeMutableRawPointer?
-    private let getDisplayList: GetDisplayList?
-    private let configureEnabled: ConfigureEnabled?
-    private var lastKnownBuiltinDisplayID: CGDirectDisplayID?
-
-    init() {
-        skyLightHandle = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY)
-        monitorPanelHandle = dlopen("/System/Library/PrivateFrameworks/MonitorPanel.framework/MonitorPanel", RTLD_LAZY)
-        if let handle = skyLightHandle, let symbol = dlsym(handle, "CGSGetDisplayList") {
-            getDisplayList = unsafeBitCast(symbol, to: GetDisplayList.self)
-        } else { getDisplayList = nil }
-        if let handle = skyLightHandle, let symbol = dlsym(handle, "CGSConfigureDisplayEnabled") {
-            configureEnabled = unsafeBitCast(symbol, to: ConfigureEnabled.self)
-        } else { configureEnabled = nil }
-        _ = builtinDisplay()
-    }
-
-    deinit {
-        if let skyLightHandle { dlclose(skyLightHandle) }
-        if let monitorPanelHandle { dlclose(monitorPanelHandle) }
-    }
-
-    var isAvailable: Bool { getDisplayList != nil && configureEnabled != nil && monitorPanelHandle != nil }
-
-    private func displays() -> [CGDirectDisplayID] {
-        guard let getDisplayList else { return [] }
-        var ids = [CGDirectDisplayID](repeating: 0, count: 32)
-        var count: UInt32 = 0
-        guard getDisplayList(32, &ids, &count) == .success else { return [] }
-        return Array(ids.prefix(Int(count)))
-    }
-
-    private func isGhost(_ id: CGDirectDisplayID) -> Bool {
-        CGDisplayIsOnline(id) == 0 && CGDisplayVendorNumber(id) == 0 &&
-            CGDisplayModelNumber(id) == 0 && CGDisplaySerialNumber(id) == 0
-    }
-
-    func builtinDisplay() -> CGDirectDisplayID? {
-        if let builtin = displays().first(where: { CGDisplayIsBuiltin($0) != 0 && !isGhost($0) }) {
-            lastKnownBuiltinDisplayID = builtin
-            return builtin
-        }
-        if let cached = lastKnownBuiltinDisplayID, CGDisplayIsBuiltin(cached) != 0 {
-            return cached
-        }
-        return nil
-    }
-
-    func externalDisplays() -> [CGDirectDisplayID] {
-        displays().filter {
-            CGDisplayIsBuiltin($0) == 0 && !isGhost($0) && CGDisplayIsOnline($0) != 0 &&
-                CGDisplayIsActive($0) != 0 && (CGDisplayVendorNumber($0) != 0 || CGDisplayModelNumber($0) != 0)
-        }
-    }
-
-    func currentPreset(name: String) -> DisplayPreset? {
-        guard let builtin = builtinDisplay() else { return nil }
-        return DisplayPreset(name: name,
-                             builtinEnabled: CGDisplayIsOnline(builtin) != 0,
-                             rotation: Int(CGDisplayRotation(builtin).rounded()),
-                             builtinPrimary: CGMainDisplayID() == builtin)
-    }
-
-    private func setEnabled(_ id: CGDirectDisplayID, _ enabled: Bool, temporary: Bool = false) -> Bool {
-        guard let configureEnabled else {
-            log("显示器切换失败：CGSConfigureDisplayEnabled 不可用")
-            return false
-        }
-        var config: CGDisplayConfigRef?
-        let beginResult = CGBeginDisplayConfiguration(&config)
-        guard beginResult == .success, let config else {
-            log("显示器 \(id) 切换失败：CGBeginDisplayConfiguration=\(beginResult.rawValue)")
-            return false
-        }
-        if !enabled, CGDisplayIsInMirrorSet(id) != 0,
-           CGConfigureDisplayMirrorOfDisplay(config, id, kCGNullDirectDisplay) != .success {
-            CGCancelDisplayConfiguration(config); return false
-        }
-        let configureResult = configureEnabled(config, id, enabled)
-        guard configureResult == .success else {
-            CGCancelDisplayConfiguration(config)
-            log("显示器 \(id) 切换失败：CGSConfigureDisplayEnabled=\(configureResult.rawValue)，目标状态=\(enabled)")
-            return false
-        }
-        let completeResult = CGCompleteDisplayConfiguration(config, temporary ? .forSession : .permanently)
-        if completeResult != .success {
-            log("显示器 \(id) 切换失败：CGCompleteDisplayConfiguration=\(completeResult.rawValue)，目标状态=\(enabled)")
-        }
-        return completeResult == .success
-    }
-
-    func enableBuiltin(force: Bool = false) -> Bool {
-        for attempt in 0..<3 {
-            guard let builtin = builtinDisplay() else {
-                log("内屏启用失败：当前无法解析内屏 ID")
-                return false
-            }
-            // Online 只表示显示器被枚举到，禁用后的面板仍可能 Online 但不 Active。
-            if !force, CGDisplayIsOnline(builtin) != 0, CGDisplayIsActive(builtin) != 0 { return true }
-            let submitted = setEnabled(builtin, true)
-            log("内屏启用请求：ID=\(builtin)，提交=\(submitted)，online=\(CGDisplayIsOnline(builtin))，active=\(CGDisplayIsActive(builtin))，asleep=\(CGDisplayIsAsleep(builtin))")
-            if submitted, CGDisplayIsOnline(builtin) != 0, CGDisplayIsActive(builtin) != 0 { return true }
-            if attempt < 2 { Thread.sleep(forTimeInterval: 0.4) }
-        }
-        return false
-    }
-
-    func builtinIsAwake() -> Bool {
-        guard let builtin = builtinDisplay() else { return false }
-        return CGDisplayIsOnline(builtin) != 0 && CGDisplayIsActive(builtin) != 0 && CGDisplayIsAsleep(builtin) == 0
-    }
-
-    func disableBuiltin() -> Bool {
-        guard !externalDisplays().isEmpty, let builtin = builtinDisplay() else { return false }
-        if CGDisplayIsOnline(builtin) == 0 { return true }
-        return setEnabled(builtin, false) && CGDisplayIsOnline(builtin) == 0
-    }
-
-    func restoreBuiltinDefault() -> Bool {
-        guard enableBuiltin(),
-              let builtin = builtinDisplay(),
-              CGDisplayIsOnline(builtin) != 0 else { return false }
-        let rotationRestored = Int(CGDisplayRotation(builtin).rounded()) == 0 || rotateBuiltin(to: 0)
-        let primaryRestored = CGMainDisplayID() == builtin || makePrimary(builtin)
-        return rotationRestored && primaryRestored
-    }
-
-    func rotateBuiltin(to degrees: Int) -> Bool {
-        guard let builtin = builtinDisplay(), CGDisplayIsOnline(builtin) != 0,
-              let cls: AnyClass = NSClassFromString("MPDisplay"),
-              let rawObject = class_createInstance(cls, 0) else { return false }
-        let object = rawObject as AnyObject
-        let initSelector = NSSelectorFromString("initWithCGSDisplayID:")
-        let setSelector = NSSelectorFromString("setOrientation:")
-        guard let initMethod = class_getInstanceMethod(cls, initSelector),
-              let setMethod = class_getInstanceMethod(cls, setSelector) else { return false }
-        typealias InitFunction = @convention(c) (AnyObject, Selector, UInt32) -> Unmanaged<AnyObject>
-        typealias SetFunction = @convention(c) (AnyObject, Selector, Int32) -> Void
-        // class_createInstance 已持有对象；init 返回同一实例，不能再次按 retained 接管，
-        // 否则函数结束时会重复 release，并在启用旋转预设时触发 EXC_BAD_ACCESS。
-        let initialized = unsafeBitCast(method_getImplementation(initMethod), to: InitFunction.self)(object, initSelector, builtin).takeUnretainedValue()
-        unsafeBitCast(method_getImplementation(setMethod), to: SetFunction.self)(initialized, setSelector, Int32(degrees))
-        return true
-    }
-
-    func makePrimary(_ target: CGDirectDisplayID) -> Bool {
-        let targetBounds = CGDisplayBounds(target)
-        var config: CGDisplayConfigRef?
-        guard CGBeginDisplayConfiguration(&config) == .success, let config else { return false }
-        for display in displays() where CGDisplayIsOnline(display) != 0 && !isGhost(display) {
-            let bounds = CGDisplayBounds(display)
-            let error = CGConfigureDisplayOrigin(config, display,
-                Int32(bounds.origin.x - targetBounds.origin.x), Int32(bounds.origin.y - targetBounds.origin.y))
-            if error != .success { CGCancelDisplayConfiguration(config); return false }
-        }
-        return CGCompleteDisplayConfiguration(config, .permanently) == .success
-    }
-
-    func apply(_ preset: DisplayPreset) -> Bool {
-        if preset.builtinEnabled {
-            guard enableBuiltin(), let builtin = builtinDisplay() else { return false }
-            _ = rotateBuiltin(to: preset.rotation)
-            let primary = preset.builtinPrimary ? builtin : (externalDisplays().first ?? builtin)
-            if CGMainDisplayID() != primary { _ = makePrimary(primary) }
-            return true
-        }
-        guard let external = externalDisplays().first else { return false }
-        if let builtin = builtinDisplay(), CGDisplayIsOnline(builtin) != 0 {
-            _ = rotateBuiltin(to: preset.rotation)
-            _ = makePrimary(external)
-        }
-        return disableBuiltin()
-    }
-}
-
 private final class StatusIndicator: NSObject, NSMenuDelegate {
     private let presenceDelayOptions = [180, 300, 600]
     private let item: NSStatusItem
     private let lamp: LampController
     private let statusMenu = NSMenu()
+    /// 开灯后等待固件就绪期间，同类调整只保留最新一次。
+    private var pendingLampOnActions: [(key: String, action: () -> Void)] = []
+    private var isWaitingForLampOn = false
+    private weak var ambientStatusItem: NSMenuItem?
+    private var iconKey: String?
     private var isMenuOpen = false
-    private var brightnessMenuItem = NSMenuItem()
-    private var temperatureMenuItem = NSMenuItem()
-    private let powerSwitch = FeatureButton(title: "灯光", symbol: "power", accentColor: activeControlColor)
-    private let brightnessSlider = InteractiveSlider(value: 50, minValue: 1, maxValue: 100, activeColor: .systemBlue)
-    private let brightnessValueLabel = NSTextField(labelWithString: "50%")
-    private let temperatureSlider = InteractiveSlider(value: 5000, minValue: 2700, maxValue: 6500, activeColor: .systemYellow)
-    private let temperatureValueLabel = NSTextField(labelWithString: "5000K")
+    private let panelMenuItem = NSMenuItem()
+    private let powerSwitch: FeatureButton = {
+        let button = FeatureButton(title: "", symbol: "power", accentColor: activeControlColor)
+        button.style = .circle
+        button.setAccessibilityLabel("灯光开关")
+        return button
+    }()
+    private let statusDot = StatusDot()
+    private let connectionLabel = NSTextField(labelWithString: "未连接")
+    private let brightnessSlider = InteractiveSlider(value: 50, minValue: 1, maxValue: 100, track: .brightness)
+    private let temperatureSlider = InteractiveSlider(value: 5000, minValue: 2700, maxValue: 6500, track: .temperature)
     private let timeTemperatureSwitch = FeatureButton(title: "自动色温", symbol: "circle.lefthalf.filled", accentColor: activeControlColor)
     private let autoLightSwitch = FeatureButton(title: "自动感光", symbol: "sun.max", accentColor: activeControlColor)
     private let presenceSwitch = FeatureButton(title: "入座检测", symbol: "figure.seated.side", accentColor: activeControlColor)
@@ -636,31 +436,16 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
     private var presenceSensitivity = 2
     private let videoModeSwitch = FeatureButton(title: "视频模式", symbol: "video", accentColor: activeControlColor)
     private let modeButton = NSButton(title: "我的最爱", target: nil, action: nil)
-    private let rotationModeButton = NSButton(title: "竖屏双屏", target: nil, action: nil)
     private var modeCenterWindow: NSWindow?
-    private let bindAppButton = NSButton(title: "绑定应用", target: nil, action: nil)
     private let brightnessFollowSwitch = FeatureButton(title: "亮度跟随", symbol: "display", accentColor: activeControlColor)
-    private let displayBrightnessLockSwitch = FeatureButton(title: "双屏亮度", symbol: "rectangle.on.rectangle", accentColor: activeControlColor)
     private let powerSyncSwitch = FeatureButton(title: "熄屏同步", symbol: "moon.zzz", accentColor: activeControlColor)
-    private let keepAwakeSwitch = FeatureButton(title: "防止休眠", symbol: "cup.and.saucer", accentColor: activeControlColor)
-    private let keepAwakeController = KeepAwakeController()
     private let captureBrightButton = FeatureButton(title: "明亮关灯", symbol: "sun.max.fill", accentColor: .systemOrange)
     private let captureDarkButton = FeatureButton(title: "昏暗开灯", symbol: "moon.fill", accentColor: .systemBlue)
     private let ambientEnableSwitch = AccentSwitch()
     private let brightThresholdLabel = NSTextField(labelWithString: "--")
     private let darkThresholdLabel = NSTextField(labelWithString: "--")
     private let ambientStatusLabel = NSTextField(labelWithString: "尚未完成环境标定")
-    private let displayPowerSwitch: FeatureButton = {
-        let button = FeatureButton(title: "内屏", symbol: "display", accentColor: activeControlColor)
-        button.image = displayPowerIcon()
-        return button
-    }()
-    private let displayRotateButton = FeatureButton(title: "旋转 0°", symbol: "arrow.clockwise", accentColor: activeControlColor)
-    private let studioPowerSwitch = FeatureButton(title: "Studio Display", symbol: "display", accentColor: activeControlColor)
-    private let displayAutoPresetSwitch = AccentSwitch()
-    private let displayController = DisplayController()
     private(set) var isBrightnessFollowEnabled: Bool
-    private(set) var isDisplayBrightnessLockEnabled: Bool
     private(set) var isPowerSyncEnabled: Bool
     private(set) var isTimeTemperatureEnabled: Bool
     private(set) var ambientCloseThreshold: Int?
@@ -669,7 +454,6 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
     private var currentAmbientSourceName = "显示器"
     private var ambientThresholdSource: String?
     private var areAmbientRulesEnabled: Bool
-    private var isDisplayAutoPresetEnabled: Bool
     private var isHealthy = true
     private var isAsleep: Bool
     private var autoLightChangePendingUntil: Date?
@@ -682,22 +466,11 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
     private var autoLightWasEnabledBeforeAmbientLock = false
     private var isScreenSleepPresenceLockActive = false
     private var presenceWasEnabledBeforeScreenSleep = false
-    private var isDisplaySessionSafe = false
-    private var pendingDisplayConnectionState: Bool?
-    private var pendingDisplayPolicyWorkItem: DispatchWorkItem?
-    private var pendingBuiltinWakeWorkItems: [DispatchWorkItem] = []
-    private var didRequestDisplaySleepForCurrentLidClosure = false
-
-    private var isBuiltinManuallyDisabled: Bool {
-        get { UserDefaults.standard.bool(forKey: "builtinManuallyDisabled") }
-        set { UserDefaults.standard.set(newValue, forKey: "builtinManuallyDisabled") }
-    }
 
     init(isAsleep: Bool, lamp: LampController) {
         self.lamp = lamp
         self.isAsleep = isAsleep
         isBrightnessFollowEnabled = UserDefaults.standard.bool(forKey: "brightnessFollowEnabled")
-        isDisplayBrightnessLockEnabled = UserDefaults.standard.bool(forKey: "displayBrightnessLockEnabled")
         isPowerSyncEnabled = UserDefaults.standard.object(forKey: "powerSyncEnabled") as? Bool ?? true
         isTimeTemperatureEnabled = UserDefaults.standard.bool(forKey: "timeTemperatureEnabled")
         ambientCloseThreshold = UserDefaults.standard.object(forKey: "ambientCloseThreshold") as? Int
@@ -716,7 +489,6 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         isAmbientPresenceLockActive = presenceWasEnabledBeforeAmbientLock || autoLightWasEnabledBeforeAmbientLock
         presenceWasEnabledBeforeScreenSleep = UserDefaults.standard.bool(forKey: "screenSleepSuspendedPresenceWasEnabled")
         isScreenSleepPresenceLockActive = presenceWasEnabledBeforeScreenSleep
-        isDisplayAutoPresetEnabled = UserDefaults.standard.bool(forKey: "displayAutoPresetEnabled")
         presenceDelaySeconds = UserDefaults.standard.object(forKey: "presenceDelaySeconds") as? Int ?? 180
         if !presenceDelayOptions.contains(presenceDelaySeconds) {
             presenceDelaySeconds = 180
@@ -730,28 +502,14 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
 
         item.button?.title = ""
         item.button?.imagePosition = .imageOnly
-        migrateDisplayPresetIfNeeded()
         configurePanel()
         configureMenu()
-        NotificationCenter.default.addObserver(self, selector: #selector(applicationWillTerminate),
-                                               name: NSApplication.willTerminateNotification, object: nil)
-        let workspaceNotifications = NSWorkspace.shared.notificationCenter
-        workspaceNotifications.addObserver(self, selector: #selector(displaySessionBecameUnsafe(_:)),
-                                           name: NSWorkspace.sessionDidResignActiveNotification, object: nil)
-        workspaceNotifications.addObserver(self, selector: #selector(displaySessionBecameUnsafe(_:)),
-                                           name: NSWorkspace.screensDidSleepNotification, object: nil)
-        workspaceNotifications.addObserver(self, selector: #selector(displaySessionBecameActive),
-                                           name: NSWorkspace.sessionDidBecomeActiveNotification, object: nil)
-        workspaceNotifications.addObserver(self, selector: #selector(displaySessionBecameActive),
-                                           name: NSWorkspace.screensDidWakeNotification, object: nil)
-        scheduleDisplaySessionActivation()
         update(isAsleep: isAsleep, healthy: true)
     }
 
     func update(isAsleep: Bool, healthy: Bool) {
         self.isAsleep = isAsleep
         isHealthy = healthy
-        handleKeepAwakeLidDisplayState()
         if lamp.isAutoLightEnabled == true, isBrightnessFollowEnabled {
             isBrightnessFollowEnabled = false
             brightnessFollowSwitch.state = .off
@@ -768,18 +526,12 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         let temperatureText = healthy ? lamp.currentTemperature.map { "\($0)K" } ?? "----K" : "----K"
         item.button?.toolTip = "\(brightnessText) · \(temperatureText)"
         item.button?.setAccessibilityLabel("iScreen Menu \(status)")
-        if displayController.isStudioCovered,
-           (displayController.studioTarget() == nil || isConsoleSessionLocked()) {
-            _ = displayController.setStudioEnabled(true)
-        }
         if isMenuOpen { refreshControls() }
     }
 
     private func configureMenu() {
         statusMenu.delegate = self
         statusMenu.autoenablesItems = false
-        brightnessMenuItem = menuSliderItem(symbol: "sun.max", title: "亮度", slider: brightnessSlider, valueLabel: brightnessValueLabel)
-        temperatureMenuItem = menuSliderItem(symbol: "thermometer.medium", title: "色温", slider: temperatureSlider, valueLabel: temperatureValueLabel)
         item.menu = statusMenu
     }
 
@@ -793,43 +545,12 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         refreshControls()
         menu.removeAllItems()
 
-        menu.addItem(.sectionHeader(title: "快捷控制"))
-        for button in [powerSwitch, autoLightSwitch, presenceSwitch, videoModeSwitch, brightnessFollowSwitch,
-                       powerSyncSwitch, timeTemperatureSwitch, displayBrightnessLockSwitch, keepAwakeSwitch] {
-            menu.addItem(menuItem(for: button))
-        }
+        menu.addItem(panelMenuItem)
 
         menu.addItem(.separator())
-        menu.addItem(.sectionHeader(title: "灯光调节"))
-        menu.addItem(brightnessMenuItem)
-        menu.addItem(temperatureMenuItem)
-
-        menu.addItem(.separator())
-        menu.addItem(.sectionHeader(title: "环境光标定"))
-        menu.addItem(menuItem(for: ambientEnableSwitch, title: "启用"))
-        menu.addItem(menuItem(for: captureBrightButton, toggle: false,
-                              title: "\(captureBrightButton.title)　\(brightThresholdLabel.stringValue)"))
-        menu.addItem(menuItem(for: captureDarkButton, toggle: false,
-                              title: "\(captureDarkButton.title)　\(darkThresholdLabel.stringValue)"))
-        let ambientStatus = NSMenuItem(title: ambientStatusLabel.stringValue, action: nil, keyEquivalent: "")
-        ambientStatus.isEnabled = false
-        menu.addItem(ambientStatus)
-
-        menu.addItem(.separator())
-        menu.addItem(.sectionHeader(title: "入座检测设置"))
-        menu.addItem(popupMenuItem(symbol: "clock", title: "离席时间", popup: presenceDelayPopup))
-        menu.addItem(popupMenuItem(symbol: "gauge", title: "侦测灵敏度", popup: presenceSensitivityPopup))
-
-        menu.addItem(.separator())
-        menu.addItem(.sectionHeader(title: "显示屏与旋转"))
-        menu.addItem(menuItem(for: displayPowerSwitch))
-        menu.addItem(menuItem(for: studioPowerSwitch))
-        menu.addItem(menuItem(for: displayRotateButton, toggle: false))
-
-        menu.addItem(.separator())
-        menu.addItem(.sectionHeader(title: "预设"))
+        menu.addItem(presenceMenuItem())
+        menu.addItem(ambientMenuItem())
         menu.addItem(modePresetMenuItem())
-        menu.addItem(rotationPresetMenuItem())
 
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "退出 iScreen Menu", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -856,41 +577,50 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         NSApp.sendAction(action, to: button.target, from: button)
     }
 
-    private func menuSliderItem(symbol: String, title: String, slider: NSSlider, valueLabel: NSTextField) -> NSMenuItem {
-        let row = sliderRow(symbol: symbol, title: title, slider: slider, valueLabel: valueLabel)
-        row.translatesAutoresizingMaskIntoConstraints = false
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: UIStyle.contentWidth + 28, height: 30))
-        container.addSubview(row)
-        NSLayoutConstraint.activate([
-            row.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 14),
-            row.centerYAnchor.constraint(equalTo: container.centerYAnchor)
-        ])
-        let item = NSMenuItem()
-        item.view = container
-        return item
+    @objc private func popupOptionSelected(_ sender: NSMenuItem) {
+        guard let popup = sender.representedObject as? NSPopUpButton, let action = popup.action else { return }
+        popup.selectItem(withTag: sender.tag)
+        NSApp.sendAction(action, to: popup.target, from: popup)
     }
 
-    private func popupMenuItem(symbol: String, title: String, popup: NSPopUpButton) -> NSMenuItem {
-        let parent = NSMenuItem(title: "\(title)：\(popup.titleOfSelectedItem ?? "")", action: nil, keyEquivalent: "")
-        parent.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
-        parent.isEnabled = popup.isEnabled
+    private func presenceMenuItem() -> NSMenuItem {
+        let parent = NSMenuItem(title: "入座检测设置", action: nil, keyEquivalent: "")
+        parent.image = NSImage(systemSymbolName: "figure.seated.side", accessibilityDescription: "入座检测")
+        parent.isEnabled = presenceDelayPopup.isEnabled
         let submenu = NSMenu()
-        for option in popup.itemArray {
-            let item = NSMenuItem(title: option.title, action: #selector(popupOptionSelected(_:)), keyEquivalent: "")
-            item.target = self
-            item.tag = option.tag
-            item.representedObject = popup
-            item.state = option === popup.selectedItem ? .on : .off
-            submenu.addItem(item)
+        for (title, popup) in [("离席时间", presenceDelayPopup), ("侦测灵敏度", presenceSensitivityPopup)] {
+            submenu.addItem(.sectionHeader(title: title))
+            for option in popup.itemArray {
+                let item = NSMenuItem(title: option.title, action: #selector(popupOptionSelected(_:)), keyEquivalent: "")
+                item.target = self
+                item.tag = option.tag
+                item.representedObject = popup
+                item.state = option === popup.selectedItem ? .on : .off
+                submenu.addItem(item)
+            }
         }
         parent.submenu = submenu
         return parent
     }
 
-    @objc private func popupOptionSelected(_ sender: NSMenuItem) {
-        guard let popup = sender.representedObject as? NSPopUpButton, let action = popup.action else { return }
-        popup.selectItem(withTag: sender.tag)
-        NSApp.sendAction(action, to: popup.target, from: popup)
+    private func ambientMenuItem() -> NSMenuItem {
+        let parent = NSMenuItem(title: "环境光标定", action: nil, keyEquivalent: "")
+        parent.image = NSImage(systemSymbolName: "sun.horizon", accessibilityDescription: "环境光标定")
+        let submenu = NSMenu()
+        submenu.autoenablesItems = false
+        submenu.addItem(menuItem(for: ambientEnableSwitch, title: "按环境光自动开关灯"))
+        submenu.addItem(.separator())
+        submenu.addItem(menuItem(for: captureBrightButton, toggle: false,
+                                 title: "记录当前光线为关灯点（\(brightThresholdLabel.stringValue)）"))
+        submenu.addItem(menuItem(for: captureDarkButton, toggle: false,
+                                 title: "记录当前光线为开灯点（\(darkThresholdLabel.stringValue)）"))
+        submenu.addItem(.separator())
+        let status = NSMenuItem(title: ambientStatusLabel.stringValue, action: nil, keyEquivalent: "")
+        status.isEnabled = false
+        ambientStatusItem = status
+        submenu.addItem(status)
+        parent.submenu = submenu
+        return parent
     }
 
     private func modePresetMenuItem() -> NSMenuItem {
@@ -912,31 +642,11 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         return parent
     }
 
-    private func rotationPresetMenuItem() -> NSMenuItem {
-        let preset = loadRotationPreset()
-        let parent = NSMenuItem(title: "旋转预设：\(preset.name)", action: nil, keyEquivalent: "")
-        parent.image = NSImage(systemSymbolName: "rotate.right", accessibilityDescription: "旋转预设")
-        parent.isEnabled = rotationModeButton.isEnabled || displayAutoPresetSwitch.isEnabled
-        let submenu = NSMenu()
-        submenu.autoenablesItems = false
-        let apply = NSMenuItem(title: "应用“\(preset.name)”", action: #selector(applyRotationPreset), keyEquivalent: "")
-        apply.target = self
-        apply.isEnabled = rotationModeButton.isEnabled
-        submenu.addItem(apply)
-        let save = NSMenuItem(title: "保存当前为旋转预设…", action: #selector(saveCurrentRotationPreset), keyEquivalent: "")
-        save.target = self
-        save.isEnabled = rotationModeButton.isEnabled
-        submenu.addItem(save)
-        submenu.addItem(.separator())
-        submenu.addItem(menuItem(for: displayAutoPresetSwitch, title: "连接 Studio Display 时自动启用"))
-        parent.submenu = submenu
-        return parent
-    }
-
     @objc private func powerChanged() {
         let requested = powerSwitch.state == .on
         if !lamp.setPower(on: requested) { powerSwitch.state = requested ? .off : .on }
         updateIcon(healthy: isHealthy && lamp.isConnected)
+        refreshControls()
         lamp.requestStatus()
     }
 
@@ -1152,6 +862,7 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         } else {
             ambientStatusLabel.stringValue = currentText
         }
+        ambientStatusItem?.title = ambientStatusLabel.stringValue
     }
 
     var isAmbientLinkEnabled: Bool {
@@ -1160,17 +871,54 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
 
     @objc private func brightnessChanged() {
         let value = Int(brightnessSlider.doubleValue.rounded())
-        brightnessValueLabel.stringValue = "\(value)%"
-        _ = lamp.setBrightness(value)
-        lamp.requestStatus()
+        withLampOn("brightness") { [weak self] in
+            guard let self else { return }
+            _ = self.lamp.setBrightness(value)
+            self.refreshControls()
+            self.lamp.requestStatus()
+        }
     }
 
     @objc private func temperatureChanged() {
         let value = Int((temperatureSlider.doubleValue / 100).rounded()) * 100
         temperatureSlider.doubleValue = Double(value)
-        temperatureValueLabel.stringValue = "\(value)K"
-        _ = lamp.setTemperature(value)
-        lamp.requestStatus()
+        withLampOn("temperature") { [weak self] in
+            guard let self else { return }
+            _ = self.lamp.setTemperature(value)
+            self.refreshControls()
+            self.lamp.requestStatus()
+        }
+    }
+
+    /// 灯关闭时固件会忽略亮度、色温与自动感光指令：先开灯，稍候再执行调整。
+    /// 等待期间同一 key 的请求只保留最新一次；环境光规则正在关灯时不开灯。
+    private func withLampOn(_ key: String, _ action: @escaping () -> Void) {
+        if isWaitingForLampOn {
+            pendingLampOnActions.removeAll { $0.key == key }
+            pendingLampOnActions.append((key, action))
+            return
+        }
+        guard lamp.isPowerOn != true else {
+            action()
+            return
+        }
+        let ambientHoldsLampOff = isAmbientPresenceLockActive || UserDefaults.standard.bool(forKey: "ambientLampLockActive")
+        guard !ambientHoldsLampOff, lamp.setPower(on: true) else {
+            autoLightChangePendingUntil = nil
+            pendingAutoLightState = nil
+            refreshControls()
+            return
+        }
+        isWaitingForLampOn = true
+        pendingLampOnActions = [(key, action)]
+        updateIcon(healthy: isHealthy && lamp.isConnected)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self else { return }
+            let actions = self.pendingLampOnActions
+            self.pendingLampOnActions.removeAll()
+            self.isWaitingForLampOn = false
+            actions.forEach { $0.action() }
+        }
     }
 
     @objc private func timeTemperatureChanged() {
@@ -1228,12 +976,19 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
 
     @objc private func autoLightChanged() {
         let requested = autoLightSwitch.state == .on
+        autoLightChangePendingUntil = Date().addingTimeInterval(1.5)
+        pendingAutoLightState = requested
+        withLampOn("autoLight") { [weak self] in self?.applyAutoLight(requested) }
+    }
+
+    private func applyAutoLight(_ requested: Bool) {
         if !lamp.setAutoLight(enabled: requested) {
-            autoLightSwitch.state = requested ? .off : .on
+            autoLightChangePendingUntil = nil
+            pendingAutoLightState = nil
+            refreshControls()
             return
         }
         autoLightChangePendingUntil = Date().addingTimeInterval(1)
-        pendingAutoLightState = requested
         if requested, isBrightnessFollowEnabled {
             isBrightnessFollowEnabled = false
             brightnessFollowSwitch.state = .off
@@ -1241,6 +996,7 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
             update(isAsleep: isAsleep, healthy: isHealthy)
             log("已关闭 Studio Display 亮度跟随，改用灯具自动感光")
         }
+        refreshControls()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
             self?.lamp.requestStatus()
         }
@@ -1290,6 +1046,7 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
 
     @objc private func presetChanged(_ sender: NSMenuItem) {
         let index = sender.tag
+        let title = sender.title
         let preset: (brightness: Int, temperature: Int, video: Bool)
         if (index == 0 || index >= 3),
            let data = UserDefaults.standard.data(forKey: "savedCustomMode"),
@@ -1305,30 +1062,16 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         isBrightnessFollowEnabled = false
         brightnessFollowSwitch.state = .off
         UserDefaults.standard.set(false, forKey: "brightnessFollowEnabled")
-        _ = lamp.setPower(on: true)
-        _ = lamp.setBrightness(preset.brightness)
-        _ = lamp.setTemperature(preset.temperature)
-        _ = lamp.setVideoMode(enabled: preset.video)
-        refreshControls()
-        modeButton.title = sender.title
-        log("已应用模式预设：\(sender.title)")
-        lamp.requestStatus()
-    }
-
-    @objc private func showModeMenu() {
-        let menu = NSMenu()
-        for (index, title) in modeNames().enumerated() {
-            let item = NSMenuItem(title: title, action: #selector(presetChanged(_:)), keyEquivalent: "")
-            item.target = self
-            item.tag = index
-            if title == modeButton.title { item.state = .on }
-            menu.addItem(item)
+        withLampOn("preset") { [weak self] in
+            guard let self else { return }
+            _ = self.lamp.setBrightness(preset.brightness)
+            _ = self.lamp.setTemperature(preset.temperature)
+            _ = self.lamp.setVideoMode(enabled: preset.video)
+            self.refreshControls()
+            self.modeButton.title = title
+            log("已应用模式预设：\(title)")
+            self.lamp.requestStatus()
         }
-        menu.addItem(.separator())
-        let center = NSMenuItem(title: "模式中心设置…", action: #selector(showModeCenter), keyEquivalent: "")
-        center.target = self
-        menu.addItem(center)
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: modeButton.bounds.height + 4), in: modeButton)
     }
 
     private func modeNames() -> [String] {
@@ -1496,7 +1239,6 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         mappings[bundleID] = mode
         if let data = try? JSONEncoder().encode(mappings) {
             UserDefaults.standard.set(data, forKey: "appModes")
-            bindAppButton.title = "已绑定 \(mode.name)"
             log("已绑定应用模式：\(mode.name)")
         }
     }
@@ -1506,11 +1248,13 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
               bundleID != lastFrontmostBundleID else { return }
         lastFrontmostBundleID = bundleID
         guard let mode = loadAppModes()[bundleID] else { return }
-        _ = lamp.setPower(on: true)
-        _ = lamp.setBrightness(mode.brightness)
-        _ = lamp.setTemperature(mode.temperature)
-        _ = lamp.setVideoMode(enabled: mode.videoMode)
-        log("已应用应用模式：\(mode.name)")
+        withLampOn("preset") { [weak self] in
+            guard let self else { return }
+            _ = self.lamp.setBrightness(mode.brightness)
+            _ = self.lamp.setTemperature(mode.temperature)
+            _ = self.lamp.setVideoMode(enabled: mode.videoMode)
+            log("已应用应用模式：\(mode.name)")
+        }
     }
 
     private func loadAppModes() -> [String: SavedMode] {
@@ -1538,393 +1282,11 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         log(isBrightnessFollowEnabled ? "已开启 Studio Display 亮度跟随" : "已关闭 Studio Display 亮度跟随")
     }
 
-    @objc private func displayBrightnessLockChanged() {
-        isDisplayBrightnessLockEnabled = displayBrightnessLockSwitch.state == .on
-        UserDefaults.standard.set(isDisplayBrightnessLockEnabled, forKey: "displayBrightnessLockEnabled")
-        log(isDisplayBrightnessLockEnabled
-            ? "已开启 MacBook 与 Studio Display 双屏亮度锁定"
-            : "已关闭 MacBook 与 Studio Display 双屏亮度锁定")
-        refreshControls()
-    }
-
     @objc private func powerSyncChanged() {
         isPowerSyncEnabled = powerSyncSwitch.state == .on
         UserDefaults.standard.set(isPowerSyncEnabled, forKey: "powerSyncEnabled")
         update(isAsleep: isAsleep, healthy: isHealthy)
         log(isPowerSyncEnabled ? "已开启熄屏电源同步" : "已关闭熄屏电源同步")
-    }
-
-    @objc private func keepAwakeChanged() {
-        let requested = keepAwakeSwitch.state == .on
-        guard keepAwakeController.setActive(requested) else {
-            keepAwakeSwitch.state = .off
-            let alert = NSAlert()
-            alert.messageText = "无法开启防止休眠"
-            alert.informativeText = "macOS 未能启动 caffeinate，请稍后重试。"
-            alert.runModal()
-            return
-        }
-        keepAwakeSwitch.state = keepAwakeController.isActive ? .on : .off
-        handleKeepAwakeLidDisplayState()
-        log(keepAwakeController.isActive ? "已开启防止空闲休眠" : "已恢复系统默认休眠")
-    }
-
-    private func handleKeepAwakeLidDisplayState() {
-        guard displayController.lidClosed() else {
-            didRequestDisplaySleepForCurrentLidClosure = false
-            return
-        }
-        guard keepAwakeController.isActive,
-              displayController.externalDisplays().isEmpty,
-              !didRequestDisplaySleepForCurrentLidClosure else { return }
-
-        // disablesleep 会让合盖后改用 displaysleep 计时；无外屏时主动请求立即熄屏。
-        didRequestDisplaySleepForCurrentLidClosure = true
-        let success = requestSystemDisplaySleep()
-        log(success
-            ? "防休眠状态下检测到合盖，已请求关闭内屏"
-            : "防休眠状态下合盖熄屏请求失败")
-    }
-
-    private func migrateDisplayPresetIfNeeded() {
-        let defaults = UserDefaults.standard
-        guard defaults.data(forKey: "rotationPreset") == nil else { return }
-        if let old = UserDefaults(suiteName: "local.qiu.builtin-display-rotation"),
-           old.bool(forKey: "DisplayPresetSaved") {
-            let preset = DisplayPreset(name: "我的旋转预设",
-                                       builtinEnabled: old.bool(forKey: "DisplayPresetBuiltinEnabled"),
-                                       rotation: old.integer(forKey: "DisplayPresetRotation"),
-                                       builtinPrimary: old.bool(forKey: "DisplayPresetBuiltinPrimary"))
-            saveRotationPreset(preset)
-            return
-        }
-        saveRotationPreset(DisplayPreset(name: "竖屏双屏", builtinEnabled: true, rotation: 90, builtinPrimary: false))
-    }
-
-    private func saveRotationPreset(_ preset: DisplayPreset) {
-        if let data = try? JSONEncoder().encode(preset) {
-            UserDefaults.standard.set(data, forKey: "rotationPreset")
-            rotationModeButton.title = preset.name
-        }
-    }
-
-    private func loadRotationPreset() -> DisplayPreset {
-        if let data = UserDefaults.standard.data(forKey: "rotationPreset"),
-           let preset = try? JSONDecoder().decode(DisplayPreset.self, from: data) { return preset }
-        return DisplayPreset(name: "竖屏双屏", builtinEnabled: true, rotation: 90, builtinPrimary: false)
-    }
-
-    private func saveDisplayBaselineIfNeeded() {
-        guard UserDefaults.standard.data(forKey: "displayAutoBaseline") == nil,
-              let baseline = displayController.currentPreset(name: "自动启用前") else { return }
-        if let data = try? JSONEncoder().encode(baseline) {
-            UserDefaults.standard.set(data, forKey: "displayAutoBaseline")
-        }
-    }
-
-    private func restoreDisplayBaseline(clear: Bool) {
-        guard let data = UserDefaults.standard.data(forKey: "displayAutoBaseline"),
-              let baseline = try? JSONDecoder().decode(DisplayPreset.self, from: data) else {
-            _ = displayController.enableBuiltin(); return
-        }
-        _ = displayController.apply(baseline)
-        if clear { UserDefaults.standard.removeObject(forKey: "displayAutoBaseline") }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in self?.refreshControls() }
-    }
-
-    @objc private func displayPowerChanged() {
-        guard isDisplaySessionSafe, !isConsoleSessionLocked() else {
-            refreshControls()
-            return
-        }
-        let requested = displayPowerSwitch.state == .on
-        let success = requested ? displayController.enableBuiltin() : displayController.disableBuiltin()
-        if success {
-            isBuiltinManuallyDisabled = !requested
-        } else {
-            displayPowerSwitch.state = requested ? .off : .on
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in self?.refreshControls() }
-    }
-
-    @objc private func studioPowerChanged() {
-        guard isDisplaySessionSafe, !isConsoleSessionLocked() else { refreshControls(); return }
-        let enabled = studioPowerSwitch.state == .on
-        guard displayController.setStudioEnabled(enabled) else {
-            refreshControls()
-            let alert = NSAlert()
-            alert.messageText = "无法切换 Studio Display"
-            alert.informativeText = "未找到可用的 Studio Display。"
-            alert.runModal()
-            return
-        }
-        if !enabled { statusMenu.cancelTracking() }
-        refreshControls()
-    }
-
-    @objc private func displaySessionBecameUnsafe(_ notification: Notification) {
-        _ = displayController.setStudioEnabled(true)
-        isDisplaySessionSafe = false
-        pendingDisplayPolicyWorkItem?.cancel()
-        pendingDisplayPolicyWorkItem = nil
-        log("锁屏或显示器休眠，已暂停内屏配置写入")
-        if notification.name == NSWorkspace.sessionDidResignActiveNotification {
-            // Chrome/Web 视频可能持有 NoDisplaySleepAssertion，使锁屏后显示器仍亮数分钟。
-            // 只在确认会话已锁定时请求系统立即熄屏，不影响解锁后的显示配置。
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                guard isConsoleSessionLocked() else { return }
-                log(requestSystemDisplaySleep()
-                    ? "检测到 Mac 已锁定，已请求系统立即熄屏"
-                    : "检测到 Mac 已锁定，但系统熄屏请求失败")
-            }
-        }
-    }
-
-    @objc private func displaySessionBecameActive() {
-        scheduleDisplaySessionActivation()
-    }
-
-    private func scheduleDisplaySessionActivation() {
-        isDisplaySessionSafe = false
-        pendingDisplayPolicyWorkItem?.cancel()
-        let workItem = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            self.isDisplaySessionSafe = true
-            let pendingState = self.pendingDisplayConnectionState
-            self.pendingDisplayConnectionState = nil
-            if let pendingState {
-                self.scheduleDisplayPolicy(forExternalConnection: pendingState)
-            }
-            self.refreshControls()
-            log("显示会话已稳定，恢复内屏手动控制")
-        }
-        pendingDisplayPolicyWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: workItem)
-    }
-
-    private func scheduleDisplayPolicy(forExternalConnection connected: Bool) {
-        pendingDisplayPolicyWorkItem?.cancel()
-        let workItem = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            let externalStillConnected = studioDisplayID() != nil
-            guard externalStillConnected == connected else { return }
-            if !connected {
-                // 外屏断开后内屏是唯一的退路：即使显示会话正在切换或锁定，
-                // 也先恢复内屏在线，避免“不安全”保护把断开事件直接丢掉。
-                self.isBuiltinManuallyDisabled = false
-                let enabled = self.displayController.enableBuiltin()
-                if enabled {
-                    self.requestBuiltinWakeAfterExternalDisconnect()
-                    if self.isDisplaySessionSafe, !isConsoleSessionLocked() {
-                        _ = self.displayController.restoreBuiltinDefault()
-                    }
-                } else {
-                    self.pendingDisplayConnectionState = false
-                    self.scheduleDisplaySessionActivation()
-                    log("外接显示器已断开，内屏恢复未生效，已安排重试")
-                }
-                self.refreshControls()
-                return
-            }
-            guard self.isDisplaySessionSafe, !isConsoleSessionLocked() else {
-                self.pendingDisplayConnectionState = true
-                return
-            }
-            if connected {
-                if self.isDisplayAutoPresetEnabled {
-                    self.saveDisplayBaselineIfNeeded()
-                    _ = self.displayController.apply(self.automaticRotationPreset())
-                    log("连接 Studio Display：自动预设已开启，应用保存角度")
-                } else {
-                    if !self.isBuiltinManuallyDisabled {
-                        _ = self.displayController.enableBuiltin()
-                    }
-                    self.resetBuiltinRotationWhenPresetDisabled()
-                }
-            }
-            self.refreshControls()
-        }
-        pendingDisplayPolicyWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: workItem)
-    }
-
-    private func requestBuiltinWakeAfterExternalDisconnect() {
-        pendingBuiltinWakeWorkItems.forEach { $0.cancel() }
-        pendingBuiltinWakeWorkItems.removeAll()
-
-        let delays: [TimeInterval] = [0, 1.5, 4, 8, 15]
-        for (index, delay) in delays.enumerated() {
-            let workItem = DispatchWorkItem { [weak self] in
-                guard let self, studioDisplayID() == nil else { return }
-                self.isBuiltinManuallyDisabled = false
-                let enabled = self.displayController.enableBuiltin(force: true)
-                let lidOpen = !self.displayController.lidClosed()
-                let wakeRequested = lidOpen && requestSystemDisplayWake()
-                if self.displayController.builtinIsAwake() {
-                    log("外接显示器已断开，系统回报内屏 online/active/awake，实际画面仍需确认")
-                    self.pendingBuiltinWakeWorkItems.forEach { $0.cancel() }
-                    self.pendingBuiltinWakeWorkItems.removeAll()
-                } else if index == delays.count - 1 {
-                    log("外接显示器已断开，内屏恢复未确认：在线=\(enabled)，盒盖=\(!lidOpen)，已请求唤醒=\(wakeRequested)")
-                }
-                self.refreshControls()
-            }
-            pendingBuiltinWakeWorkItems.append(workItem)
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
-        }
-    }
-
-    private func automaticRotationPreset() -> DisplayPreset {
-        var preset = loadRotationPreset()
-        preset.builtinEnabled = !isBuiltinManuallyDisabled
-        return preset
-    }
-
-    @objc private func displayRotationChanged() {
-        guard isDisplaySessionSafe, !isConsoleSessionLocked() else { return }
-        guard let builtin = displayController.builtinDisplay(), CGDisplayIsOnline(builtin) != 0 else { return }
-        let current = Int(CGDisplayRotation(builtin).rounded())
-        let next = current == 0 ? 90 : (current == 90 ? 270 : 0)
-        statusMenu.cancelTracking()
-        guard displayController.rotateBuiltin(to: next) else {
-            log("内屏旋转失败，未进入确认流程")
-            return
-        }
-
-        let alert = NSAlert()
-        alert.messageText = "保留内屏旋转？"
-        alert.informativeText = "5 秒内未确认，将恢复到 \(current)°。"
-        alert.addButton(withTitle: "保留旋转")
-        alert.addButton(withTitle: "恢复原状")
-        // 不让连续按回车意外确认旋转；Esc 始终回退。
-        alert.buttons[0].keyEquivalent = ""
-        alert.buttons[1].keyEquivalent = "\u{1b}"
-        let deadline = ProcessInfo.processInfo.systemUptime + 5
-        var expired = false
-        let countdown = Timer(timeInterval: 0.1, repeats: true) { _ in
-            let remaining = deadline - ProcessInfo.processInfo.systemUptime
-            if remaining <= 0 {
-                expired = true
-                NSApplication.shared.abortModal()
-            } else {
-                alert.informativeText = "\(Int(ceil(remaining))) 秒内未确认，将恢复到 \(current)°。"
-            }
-        }
-        // runModal 使用独立运行循环模式，普通 scheduledTimer 在此期间不会触发。
-        RunLoop.main.add(countdown, forMode: .modalPanel)
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        let response = alert.runModal()
-        countdown.invalidate()
-        alert.window.orderOut(nil)
-        let confirmed = response == .alertFirstButtonReturn && !expired &&
-            ProcessInfo.processInfo.systemUptime < deadline
-        if !confirmed {
-            let restored = displayController.rotateBuiltin(to: current)
-            log(restored ? "未确认内屏旋转，已请求恢复到 \(current)°" : "内屏旋转回退失败")
-        } else {
-            log("已确认内屏旋转为 \(next)°")
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in self?.refreshControls() }
-    }
-
-    @objc private func displayAutoPresetChanged() {
-        guard isDisplaySessionSafe, !isConsoleSessionLocked() else {
-            refreshControls()
-            return
-        }
-        isDisplayAutoPresetEnabled = displayAutoPresetSwitch.state == .on
-        UserDefaults.standard.set(isDisplayAutoPresetEnabled, forKey: "displayAutoPresetEnabled")
-        if isDisplayAutoPresetEnabled {
-            saveDisplayBaselineIfNeeded()
-            if !displayController.externalDisplays().isEmpty { _ = displayController.apply(automaticRotationPreset()) }
-            log("旋转自动预设已开启")
-        } else {
-            // 关闭预设明确回到横屏，旧基线可能已经是 270°，不能再应用。
-            UserDefaults.standard.removeObject(forKey: "displayAutoBaseline")
-            resetBuiltinRotationWhenPresetDisabled()
-            log("旋转自动预设已关闭，后续连接保持 0°")
-        }
-        refreshControls()
-    }
-
-    private func resetBuiltinRotationWhenPresetDisabled() {
-        guard !isDisplayAutoPresetEnabled,
-              let builtin = displayController.builtinDisplay(),
-              CGDisplayIsOnline(builtin) != 0 else { return }
-        if Int(CGDisplayRotation(builtin).rounded()) != 0 {
-            let requested = displayController.rotateBuiltin(to: 0)
-            log("自动预设关闭，恢复内屏横屏请求：\(requested)")
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-            guard let self, !self.isDisplayAutoPresetEnabled,
-                  let id = self.displayController.builtinDisplay() else { return }
-            log("自动预设关闭，内屏角度回读：\(Int(CGDisplayRotation(id).rounded()))°")
-            self.refreshControls()
-        }
-    }
-
-    @objc private func showRotationModeMenu() {
-        let menu = NSMenu()
-        let preset = loadRotationPreset()
-        let apply = NSMenuItem(title: "应用“\(preset.name)”", action: #selector(applyRotationPreset), keyEquivalent: "")
-        apply.target = self; menu.addItem(apply)
-        let save = NSMenuItem(title: "保存当前为旋转预设…", action: #selector(saveCurrentRotationPreset), keyEquivalent: "")
-        save.target = self; menu.addItem(save)
-        menu.addItem(.separator())
-        let automatic = NSMenuItem(title: "连接 Studio Display 时自动启用", action: #selector(toggleRotationPresetAutomation), keyEquivalent: "")
-        automatic.target = self; automatic.state = isDisplayAutoPresetEnabled ? .on : .off
-        menu.addItem(automatic)
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: rotationModeButton.bounds.height + 4), in: rotationModeButton)
-    }
-
-    @objc private func applyRotationPreset() {
-        guard isDisplaySessionSafe, !isConsoleSessionLocked() else { return }
-        if !displayController.apply(loadRotationPreset()) { log("应用旋转预设失败") }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in self?.refreshControls() }
-    }
-
-    @objc private func saveCurrentRotationPreset() {
-        guard let current = displayController.currentPreset(name: "我的旋转预设") else { return }
-        let alert = NSAlert()
-        alert.messageText = "保存旋转预设"
-        alert.informativeText = "记录内屏开关、旋转角度和主屏角色。"
-        let field = NSTextField(string: loadRotationPreset().name)
-        field.frame = NSRect(x: 0, y: 0, width: 240, height: 24)
-        alert.accessoryView = field
-        alert.addButton(withTitle: "保存"); alert.addButton(withTitle: "取消")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        var preset = current
-        preset.name = field.stringValue.isEmpty ? "我的旋转预设" : field.stringValue
-        saveRotationPreset(preset)
-        log("已保存旋转预设：\(preset.name)")
-    }
-
-    @objc private func toggleRotationPresetAutomation() {
-        displayAutoPresetSwitch.state = isDisplayAutoPresetEnabled ? .off : .on
-        displayAutoPresetChanged()
-    }
-
-    func handleStudioDisplayConnection(connected: Bool) {
-        pendingDisplayConnectionState = connected
-        if connected {
-            pendingBuiltinWakeWorkItems.forEach { $0.cancel() }
-            pendingBuiltinWakeWorkItems.removeAll()
-        }
-        if !connected {
-            // 不等待 5 秒的会话稳定期；先尝试打开内屏，后续再恢复旋转和主屏。
-            isBuiltinManuallyDisabled = false
-            requestBuiltinWakeAfterExternalDisconnect()
-            log("检测到外屏断开，已安排强制启用内屏和独立重试")
-        }
-        guard isDisplaySessionSafe else { return }
-        pendingDisplayConnectionState = nil
-        scheduleDisplayPolicy(forExternalConnection: connected)
-    }
-
-    @objc private func applicationWillTerminate() {
-        pendingDisplayPolicyWorkItem?.cancel()
-        _ = displayController.setStudioEnabled(true)
-        _ = keepAwakeController.setActive(false)
     }
 
     private func configurePanel() {
@@ -1936,8 +1298,6 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         temperatureSlider.target = self
         temperatureSlider.action = #selector(temperatureChanged)
         temperatureSlider.isContinuous = false
-        temperatureSlider.numberOfTickMarks = 5
-        temperatureSlider.tickMarkPosition = .below
         timeTemperatureSwitch.target = self
         timeTemperatureSwitch.action = #selector(timeTemperatureChanged)
         timeTemperatureSwitch.toolTip = "根据当前时间自动调整色温"
@@ -1971,24 +1331,16 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         modeButton.bezelStyle = .rounded
         modeButton.controlSize = .large
         modeButton.font = UIStyle.bodyFont
-        modeButton.target = self
-        modeButton.action = #selector(showModeMenu)
-        bindAppButton.image = NSImage(systemSymbolName: "app.badge", accessibilityDescription: nil)
-        bindAppButton.imagePosition = .imageLeading
-        bindAppButton.bezelStyle = .roundRect
-        bindAppButton.controlSize = .small
-        bindAppButton.target = self
-        bindAppButton.action = #selector(bindCurrentModeToApp)
         brightnessFollowSwitch.target = self
         brightnessFollowSwitch.action = #selector(brightnessFollowChanged)
-        displayBrightnessLockSwitch.target = self
-        displayBrightnessLockSwitch.action = #selector(displayBrightnessLockChanged)
-        displayBrightnessLockSwitch.toolTip = "锁定 MacBook 内屏与 Studio Display 当前亮度差，调节任意一块时双向跟随"
+        timeTemperatureSwitch.detail = "随时间调整"
+        brightnessFollowSwitch.detail = "跟随显示器"
+        powerSyncSwitch.detail = "熄屏时关灯"
+        brightnessFollowSwitch.toolTip = "灯光亮度跟随 Studio Display"
+        powerSyncSwitch.toolTip = "Studio Display 熄屏时关灯"
+        videoModeSwitch.toolTip = "视频会议补光模式"
         powerSyncSwitch.target = self
         powerSyncSwitch.action = #selector(powerSyncChanged)
-        keepAwakeSwitch.target = self
-        keepAwakeSwitch.action = #selector(keepAwakeChanged)
-        keepAwakeSwitch.toolTip = "在电池、接通电源或合盖时阻止休眠；首次开启需要管理员授权"
         captureBrightButton.target = self
         captureBrightButton.action = #selector(captureBrightThreshold)
         captureBrightButton.setButtonType(.momentaryPushIn)
@@ -2006,109 +1358,94 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         }
         ambientStatusLabel.font = .monospacedDigitSystemFont(ofSize: 10.5, weight: .regular)
         ambientStatusLabel.textColor = .secondaryLabelColor
-        displayPowerSwitch.target = self
-        displayPowerSwitch.action = #selector(displayPowerChanged)
-        studioPowerSwitch.target = self
-        studioPowerSwitch.action = #selector(studioPowerChanged)
-        studioPowerSwitch.toolTip = "纯黑遮罩，不断开显示器、不改变窗口布局；双击黑屏或再次点击按钮恢复"
-        displayRotateButton.setButtonType(.momentaryPushIn)
-        displayRotateButton.target = self
-        displayRotateButton.action = #selector(displayRotationChanged)
-        displayAutoPresetSwitch.target = self
-        displayAutoPresetSwitch.action = #selector(displayAutoPresetChanged)
-        rotationModeButton.title = loadRotationPreset().name
-        rotationModeButton.image = NSImage(systemSymbolName: "chevron.up.chevron.down", accessibilityDescription: nil)
-        rotationModeButton.imagePosition = .imageTrailing
-        rotationModeButton.alignment = .left
-        rotationModeButton.bezelStyle = .rounded
-        rotationModeButton.controlSize = .large
-        rotationModeButton.font = UIStyle.bodyFont
-        rotationModeButton.target = self
-        rotationModeButton.action = #selector(showRotationModeMenu)
 
-        [brightnessSlider, temperatureSlider].forEach { $0.controlSize = .small }
         [presenceDelayPopup, presenceSensitivityPopup].forEach { $0.controlSize = .small }
-        brightnessValueLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
-        brightnessValueLabel.textColor = .secondaryLabelColor
-        temperatureValueLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
-        temperatureValueLabel.textColor = .secondaryLabelColor
+
+        let title = NSTextField(labelWithString: "iScreenBar")
+        title.font = .systemFont(ofSize: 13, weight: .semibold)
+        connectionLabel.font = .systemFont(ofSize: 11)
+        connectionLabel.textColor = .secondaryLabelColor
+        let status = NSStackView(views: [statusDot, connectionLabel])
+        status.orientation = .horizontal
+        status.alignment = .centerY
+        status.spacing = 5
+        let titles = NSStackView(views: [title, status])
+        titles.orientation = .vertical
+        titles.alignment = .leading
+        titles.spacing = 2
+        powerSwitch.widthAnchor.constraint(equalToConstant: 32).isActive = true
+        powerSwitch.heightAnchor.constraint(equalToConstant: 32).isActive = true
+        let headerSpacer = NSView()
+        headerSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let header = NSStackView(views: [titles, headerSpacer, powerSwitch])
+        header.orientation = .horizontal
+        header.alignment = .centerY
+        header.spacing = 10
+        header.widthAnchor.constraint(equalToConstant: UIStyle.contentWidth).isActive = true
+
+        for slider in [brightnessSlider, temperatureSlider] {
+            slider.widthAnchor.constraint(equalToConstant: UIStyle.contentWidth).isActive = true
+        }
+        let sliders = NSStackView(views: [brightnessSlider, temperatureSlider])
+        sliders.orientation = .vertical
+        sliders.spacing = 8
+        let toggles = toggleGrid([[autoLightSwitch, timeTemperatureSwitch], [presenceSwitch, videoModeSwitch],
+                                  [brightnessFollowSwitch, powerSyncSwitch]])
+
+        // 入座检测、环境光标定与灯光预设属于设置项，放在下方的原生子菜单中。
+        let stack = NSStackView(views: [header, sliders, toggles])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 12
+        // 滑块与开关方块的行距一致，构成同一组控件。
+        stack.setCustomSpacing(sliders.spacing, after: sliders)
+        stack.edgeInsets = NSEdgeInsets(top: 10, left: UIStyle.outerInset, bottom: 8, right: UIStyle.outerInset)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        let panelView = NSView()
+        panelView.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: panelView.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: panelView.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: panelView.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: panelView.bottomAnchor)
+        ])
+        panelView.frame = NSRect(origin: .zero, size: NSSize(width: UIStyle.panelWidth, height: stack.fittingSize.height))
+        panelMenuItem.view = panelView
     }
 
-    private func sliderRow(symbol: String, title: String, slider: NSSlider, valueLabel: NSTextField) -> NSStackView {
-        let label = rowLabel(title)
-        label.widthAnchor.constraint(equalToConstant: 32).isActive = true
-        slider.widthAnchor.constraint(equalToConstant: 184).isActive = true
-        valueLabel.alignment = .right
-        valueLabel.widthAnchor.constraint(equalToConstant: 48).isActive = true
-        let row = NSStackView(views: [symbolView(symbol), label, slider, valueLabel])
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 8
-        return row
-    }
-
-    private func optionField(symbol: String, title: String, control: NSView) -> NSStackView {
-        let heading = NSStackView(views: [symbolView(symbol), rowLabel(title)])
-        heading.orientation = .horizontal
-        heading.alignment = .centerY
-        heading.spacing = 6
-        let field = NSStackView(views: [heading, control])
-        field.orientation = .vertical
-        field.alignment = .leading
-        field.spacing = 5
-        control.widthAnchor.constraint(equalToConstant: 150).isActive = true
-        return field
-    }
-
-    private func optionsRow(symbol: String, title: String, controls: [NSView]) -> NSStackView {
-        let row = NSStackView(views: [symbolView(symbol), rowLabel(title), flexibleSpace()] + controls)
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 8
-        return row
-    }
-
-    private func symbolView(_ name: String) -> NSImageView {
-        let image = NSImage(systemSymbolName: name, accessibilityDescription: nil)
-        let view = NSImageView(image: image ?? NSImage())
-        view.contentTintColor = .secondaryLabelColor
-        view.symbolConfiguration = .init(pointSize: UIStyle.iconSize, weight: .regular)
-        view.widthAnchor.constraint(equalToConstant: 18).isActive = true
-        view.heightAnchor.constraint(equalToConstant: 18).isActive = true
-        return view
-    }
-
-    private func rowLabel(_ title: String) -> NSTextField {
-        let label = NSTextField(labelWithString: title)
-        label.font = UIStyle.bodyFont
-        return label
-    }
-
-    private func sectionLabel(_ title: String) -> NSTextField {
-        let label = NSTextField(labelWithString: title)
-        label.font = UIStyle.captionFont
-        label.textColor = .secondaryLabelColor
-        return label
-    }
-
-    private func flexibleSpace() -> NSView {
-        let view = NSView()
-        view.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        return view
-    }
-
-    private func separator() -> NSBox {
-        let divider = NSBox()
-        divider.boxType = .separator
-        divider.widthAnchor.constraint(equalToConstant: UIStyle.contentWidth).isActive = true
-        return divider
+    /// 开关卡片网格：每行等宽，两端与滑块边缘对齐，间距与滑块间距一致。
+    private func toggleGrid(_ rows: [[FeatureButton]]) -> NSStackView {
+        let rowViews: [NSView] = rows.map { buttons in
+            let width = (UIStyle.contentWidth - 8 * CGFloat(buttons.count - 1)) / CGFloat(buttons.count)
+            let tiles: [NSView] = buttons.map { button in
+                let background = FrostedBackground(cornerRadius: UIStyle.controlRadius)
+                button.translatesAutoresizingMaskIntoConstraints = false
+                background.addSubview(button)
+                NSLayoutConstraint.activate([
+                    button.leadingAnchor.constraint(equalTo: background.leadingAnchor),
+                    button.trailingAnchor.constraint(equalTo: background.trailingAnchor),
+                    button.topAnchor.constraint(equalTo: background.topAnchor),
+                    button.bottomAnchor.constraint(equalTo: background.bottomAnchor),
+                    background.widthAnchor.constraint(equalToConstant: width),
+                    background.heightAnchor.constraint(equalToConstant: UIStyle.controlHeight)
+                ])
+                return background
+            }
+            let row = NSStackView(views: tiles)
+            row.orientation = .horizontal
+            row.spacing = 8
+            row.alignment = .top
+            row.widthAnchor.constraint(equalToConstant: UIStyle.contentWidth).isActive = true
+            return row
+        }
+        let grid = NSStackView(views: rowViews)
+        grid.orientation = .vertical
+        grid.spacing = 8
+        return grid
     }
 
     private func refreshControls() {
-        let displayControlsAllowed = isDisplaySessionSafe && !isConsoleSessionLocked()
-        let studioID = displayController.studioTarget()
-        studioPowerSwitch.state = studioID != nil && !displayController.isStudioCovered ? .on : .off
-        studioPowerSwitch.isEnabled = displayControlsAllowed && studioID != nil
         powerSwitch.state = lamp.isPowerOn == true ? .on : .off
         let autoLightChangePending = autoLightChangePendingUntil.map { Date() < $0 } ?? false
         if isAmbientPresenceLockActive {
@@ -2148,43 +1485,40 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         }
         videoModeSwitch.state = lamp.isVideoModeEnabled == true ? .on : .off
         brightnessFollowSwitch.state = isBrightnessFollowEnabled ? .on : .off
-        displayBrightnessLockSwitch.state = isDisplayBrightnessLockEnabled ? .on : .off
-        displayBrightnessLockSwitch.isEnabled = displayControlsAllowed && studioDisplayID() != nil && activeBuiltinDisplayID() != nil
         powerSyncSwitch.state = isPowerSyncEnabled ? .on : .off
-        keepAwakeSwitch.state = keepAwakeController.isActive ? .on : .off
         timeTemperatureSwitch.state = isTimeTemperatureEnabled ? .on : .off
         updateAmbientStatusLabel()
-        if let builtin = displayController.builtinDisplay() {
-            let online = CGDisplayIsOnline(builtin) != 0
-            displayPowerSwitch.state = online ? .on : .off
-            displayPowerSwitch.isEnabled = displayControlsAllowed && displayController.isAvailable
-            displayRotateButton.isEnabled = displayControlsAllowed && online && displayController.isAvailable
-            rotationModeButton.isEnabled = displayControlsAllowed && online && displayController.isAvailable
-            displayRotateButton.title = online ? "旋转 \(Int(CGDisplayRotation(builtin).rounded()))°" : "旋转 —"
-        } else {
-            displayPowerSwitch.state = .off
-            displayPowerSwitch.isEnabled = false
-            displayRotateButton.isEnabled = false
-            rotationModeButton.isEnabled = false
-            displayRotateButton.title = "旋转 —"
-        }
-        displayAutoPresetSwitch.state = isDisplayAutoPresetEnabled ? .on : .off
-        displayAutoPresetSwitch.isEnabled = displayControlsAllowed && displayController.isAvailable && displayController.builtinDisplay() != nil
-        rotationModeButton.title = loadRotationPreset().name
         selectPresenceDelay(presenceDelaySeconds)
         presenceSensitivityPopup.selectItem(withTag: presenceSensitivity)
-        if let brightness = lamp.currentBrightness {
+        if let brightness = lamp.currentBrightness, !brightnessSlider.isTracking {
             brightnessSlider.doubleValue = Double(brightness)
-            brightnessValueLabel.stringValue = "\(brightness)%"
         }
-        if let temperature = lamp.currentTemperature {
+        if let temperature = lamp.currentTemperature, !temperatureSlider.isTracking {
             temperatureSlider.doubleValue = Double(temperature)
-            temperatureValueLabel.stringValue = "\(temperature)K"
         }
         let enabled = lamp.isConnected
         powerSwitch.isEnabled = enabled
+        let presencePaused = isAmbientPresenceLockActive || isScreenSleepPresenceLockActive
+        presenceSwitch.detail = presencePaused ? "已暂停" : "离席 \(presenceDelaySeconds / 60) 分钟"
+        if !enabled {
+            statusDot.color = .tertiaryLabelColor
+            connectionLabel.stringValue = "未连接"
+        } else if !isHealthy {
+            statusDot.color = .systemOrange
+            connectionLabel.stringValue = "同步异常"
+        } else {
+            statusDot.color = .systemGreen
+            switch lamp.isPowerOn {
+            case true?:
+                let values = [lamp.currentBrightness.map { "\($0)%" }, lamp.currentTemperature.map { "\($0)K" }]
+                connectionLabel.stringValue = (["已连接"] + values.compactMap { $0 }).joined(separator: " · ")
+            case false?: connectionLabel.stringValue = "已连接 · 灯已关闭"
+            case nil: connectionLabel.stringValue = "已连接"
+            }
+        }
         autoLightSwitch.isEnabled = enabled && !isAmbientPresenceLockActive
-        brightnessSlider.isEnabled = enabled
+        // 自动感光由灯体自行调节亮度，期间手动亮度无效，与自动色温时的色温滑块一致置灰。
+        brightnessSlider.isEnabled = enabled && lamp.isAutoLightEnabled != true
         temperatureSlider.isEnabled = enabled && !isTimeTemperatureEnabled
         timeTemperatureSwitch.isEnabled = enabled
         presenceSwitch.isEnabled = enabled && !isAmbientPresenceLockActive && !isScreenSleepPresenceLockActive
@@ -2197,13 +1531,13 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
     }
 
     private func updateIcon(healthy: Bool) {
-        // 单色模板图标：亮灯为实心太阳，关灯为空心，异常时变暗。
-        let symbolName = healthy && lamp.isPowerOn == true ? "sun.max.fill" : "sun.min"
-        let symbol = NSImage(systemSymbolName: symbolName, accessibilityDescription: "iScreenBar 状态")
-        symbol?.isTemplate = true
-        item.button?.attributedTitle = NSAttributedString(string: "")
-        item.button?.image = symbol
-        item.button?.appearsDisabled = !healthy
+        let level = lamp.isConnected && lamp.isPowerOn == true ? lamp.currentBrightness ?? 100 : 0
+        let key = "\(level)-\(healthy)"
+        if key != iconKey {
+            iconKey = key
+            item.button?.attributedTitle = NSAttributedString(string: "")
+            item.button?.image = brightnessStatusIcon(level: level, warning: !healthy)
+        }
     }
 
     private func selectPresenceDelay(_ seconds: Int) {
@@ -2253,7 +1587,7 @@ private final class LampController {
 
     deinit {
         if let device {
-            IOHIDDeviceUnscheduleFromRunLoop(device, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue)
+            IOHIDDeviceUnscheduleFromRunLoop(device, CFRunLoopGetCurrent(), CFRunLoopMode.commonModes.rawValue)
         }
         IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone))
         inputBuffer.deallocate()
@@ -2396,7 +1730,7 @@ private final class LampController {
     }
 
     private func configureInputCallback(for device: IOHIDDevice) {
-        IOHIDDeviceScheduleWithRunLoop(device, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue)
+        IOHIDDeviceScheduleWithRunLoop(device, CFRunLoopGetCurrent(), CFRunLoopMode.commonModes.rawValue)
         IOHIDDeviceRegisterInputReportCallback(
             device, inputBuffer, 64,
             { context, _, _, _, _, report, reportLength in
@@ -2431,7 +1765,7 @@ private final class LampController {
 
     private func reconnect() -> Bool {
         if let device {
-            IOHIDDeviceUnscheduleFromRunLoop(device, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue)
+            IOHIDDeviceUnscheduleFromRunLoop(device, CFRunLoopGetCurrent(), CFRunLoopMode.commonModes.rawValue)
         }
         device = nil
         IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone))
@@ -2461,10 +1795,8 @@ private final class LampController {
 
 private final class DisplayBrightnessReader {
     private typealias GetBrightness = @convention(c) (CGDirectDisplayID, UnsafeMutablePointer<Float>) -> Int32
-    private typealias SetBrightness = @convention(c) (CGDirectDisplayID, Float) -> Int32
     private let handle: UnsafeMutableRawPointer?
     private let getter: GetBrightness?
-    private let setter: SetBrightness?
 
     init() {
         handle = dlopen("/System/Library/PrivateFrameworks/DisplayServices.framework/DisplayServices", RTLD_LAZY)
@@ -2472,11 +1804,6 @@ private final class DisplayBrightnessReader {
             getter = unsafeBitCast(symbol, to: GetBrightness.self)
         } else {
             getter = nil
-        }
-        if let handle, let symbol = dlsym(handle, "DisplayServicesSetBrightness") {
-            setter = unsafeBitCast(symbol, to: SetBrightness.self)
-        } else {
-            setter = nil
         }
     }
 
@@ -2489,12 +1816,6 @@ private final class DisplayBrightnessReader {
         var value: Float = 0
         guard getter(displayID, &value) == 0 else { return nil }
         return Int((max(0, min(1, value)) * 100).rounded())
-    }
-
-    func setPercent(_ percent: Int, for displayID: CGDirectDisplayID) -> Bool {
-        guard let setter else { return false }
-        let value = Float(max(0, min(100, percent))) / 100
-        return setter(displayID, value) == 0
     }
 }
 
@@ -2593,23 +1914,15 @@ private func studioDisplayID() -> CGDirectDisplayID? {
         CGDisplayIsBuiltin($0) == 0 &&
             CGDisplayIsOnline($0) != 0 &&
             CGDisplayVendorNumber($0) == appleDisplayVendorID &&
-            CGDisplayModelNumber($0) == studioDisplayProductID
+            (studioDisplayProductIDs.contains(CGDisplayModelNumber($0)) || isNamedStudioDisplay($0))
     }
 }
 
-private func activeBuiltinDisplayID() -> CGDirectDisplayID? {
-    var count: UInt32 = 0
-    guard CGGetOnlineDisplayList(0, nil, &count) == .success else { return nil }
-    var displays = [CGDirectDisplayID](repeating: 0, count: Int(count))
-    guard CGGetOnlineDisplayList(count, &displays, &count) == .success else { return nil }
-    return displays.prefix(Int(count)).first {
-        CGDisplayIsBuiltin($0) != 0 && CGDisplayIsOnline($0) != 0 && CGDisplayIsActive($0) != 0
+private func isNamedStudioDisplay(_ id: CGDirectDisplayID) -> Bool {
+    NSScreen.screens.contains {
+        ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == id &&
+            $0.localizedName.replacingOccurrences(of: " ", with: "").lowercased().contains("studiodisplay")
     }
-}
-
-private func isConsoleSessionLocked() -> Bool {
-    guard let session = CGSessionCopyCurrentDictionary() as? [String: Any] else { return true }
-    return session["CGSSessionScreenIsLocked"] as? Bool ?? false
 }
 
 var displayID = studioDisplayID()
@@ -2623,7 +1936,6 @@ if let displayID {
     log("未找到外接显示器，程序保持运行并等待 Studio Display 连接")
 }
 var wasAsleep = displayID.map { CGDisplayIsAsleep($0) != 0 } ?? false
-var wasConsoleSessionLocked = isConsoleSessionLocked()
 var helperTurnedLampOff = false
 var ambientTurnedLampOff = UserDefaults.standard.bool(forKey: "ambientLampLockActive")
 var ambientCloseCandidateSince: Date?
@@ -2641,22 +1953,16 @@ private func setAmbientLampLock(_ active: Bool) {
     }
 }
 private let statusIndicator = StatusIndicator(isAsleep: wasAsleep, lamp: lamp)
-statusIndicator.handleStudioDisplayConnection(connected: displayID != nil)
 if !wasAsleep {
     statusIndicator.restorePresenceAfterScreenWake()
 }
 var wasBrightnessFollowEnabled = statusIndicator.isBrightnessFollowEnabled
-var wasDisplayBrightnessLockEnabled = statusIndicator.isDisplayBrightnessLockEnabled
 var wasPowerSyncEnabled = statusIndicator.isPowerSyncEnabled
 var wasAmbientLinkEnabled = statusIndicator.isAmbientLinkEnabled
 var wasAmbientCloseThreshold = statusIndicator.ambientCloseThreshold
 var brightnessOffset: Int?
 var anchorStatusRevision: Int?
 var lastDisplayBrightness: Int?
-var displayBrightnessOffset: Int?
-var lastBuiltinDisplayBrightness: Int?
-var lastStudioDisplayBrightnessForLock: Int?
-var displayBrightnessWriteSuppressedUntil = Date.distantPast
 var lastStatusRequest = Date.distantPast
 var wasLampConnected = lamp.isConnected
 if !wasAmbientLinkEnabled, ambientTurnedLampOff || statusIndicator.hasPendingAmbientPresenceRestore {
@@ -2673,24 +1979,11 @@ if wasBrightnessFollowEnabled {
 
 private func pollDisplayAndLamp() {
     statusIndicator.applyModeForFrontmostAppIfNeeded()
-    let consoleSessionLocked = isConsoleSessionLocked()
-    if consoleSessionLocked != wasConsoleSessionLocked {
-        if consoleSessionLocked {
-            log(requestSystemDisplaySleep()
-                ? "轮询检测到 Mac 已锁定，已请求系统立即熄屏"
-                : "轮询检测到 Mac 已锁定，但系统熄屏请求失败")
-        } else {
-            log("检测到 Mac 已解锁")
-        }
-        wasConsoleSessionLocked = consoleSessionLocked
-    }
     let detectedDisplayID = studioDisplayID()
     if detectedDisplayID != displayID {
         displayID = detectedDisplayID
         brightnessOffset = nil
         lastDisplayBrightness = nil
-        lastBuiltinDisplayBrightness = nil
-        lastStudioDisplayBrightnessForLock = nil
         anchorStatusRevision = nil
         if let displayID {
             wasAsleep = CGDisplayIsAsleep(displayID) != 0
@@ -2699,11 +1992,9 @@ private func pollDisplayAndLamp() {
             wasAsleep = false
             log("Studio Display 已断开，程序继续驻留等待重连")
         }
-        statusIndicator.handleStudioDisplayConnection(connected: displayID != nil)
     }
     let isAsleep = displayID.map { CGDisplayIsAsleep($0) != 0 } ?? false
     let brightnessFollowEnabled = statusIndicator.isBrightnessFollowEnabled
-    let displayBrightnessLockEnabled = statusIndicator.isDisplayBrightnessLockEnabled
     let powerSyncEnabled = statusIndicator.isPowerSyncEnabled
     let ambientLinkEnabled = statusIndicator.isAmbientLinkEnabled
     let ambientCloseThreshold = statusIndicator.ambientCloseThreshold
@@ -2875,7 +2166,7 @@ private func pollDisplayAndLamp() {
             statusIndicator.restorePresenceAfterScreenWake()
         }
         wasPowerSyncEnabled = powerSyncEnabled
-        statusIndicator.update(isAsleep: isAsleep, healthy: true)
+        statusIndicator.update(isAsleep: isAsleep, healthy: lamp.isConnected && displayID != nil)
     }
 
     if brightnessFollowEnabled != wasBrightnessFollowEnabled {
@@ -2888,15 +2179,7 @@ private func pollDisplayAndLamp() {
             anchorStatusRevision = nil
         }
         wasBrightnessFollowEnabled = brightnessFollowEnabled
-        statusIndicator.update(isAsleep: isAsleep, healthy: true)
-    }
-
-    if displayBrightnessLockEnabled != wasDisplayBrightnessLockEnabled {
-        displayBrightnessOffset = nil
-        lastBuiltinDisplayBrightness = nil
-        lastStudioDisplayBrightnessForLock = nil
-        displayBrightnessWriteSuppressedUntil = Date.distantPast
-        wasDisplayBrightnessLockEnabled = displayBrightnessLockEnabled
+        statusIndicator.update(isAsleep: isAsleep, healthy: lamp.isConnected && displayID != nil)
     }
 
     if isAsleep != wasAsleep {
@@ -2907,7 +2190,7 @@ private func pollDisplayAndLamp() {
                 helperTurnedLampOff = lamp.setPower(on: false)
                 statusIndicator.update(isAsleep: true, healthy: helperTurnedLampOff)
             } else {
-                statusIndicator.update(isAsleep: true, healthy: true)
+                statusIndicator.update(isAsleep: true, healthy: lamp.isConnected && displayID != nil)
             }
         } else {
             log("检测到 Studio Display 唤醒")
@@ -2917,7 +2200,7 @@ private func pollDisplayAndLamp() {
                 helperTurnedLampOff = false
             } else {
                 helperTurnedLampOff = false
-                statusIndicator.update(isAsleep: false, healthy: true)
+                statusIndicator.update(isAsleep: false, healthy: lamp.isConnected && displayID != nil)
             }
             statusIndicator.restorePresenceAfterScreenWake()
         }
@@ -2925,52 +2208,6 @@ private func pollDisplayAndLamp() {
     }
 
     statusIndicator.applyScheduledTemperatureIfNeeded(isAsleep: isAsleep)
-
-    if displayBrightnessLockEnabled,
-       !isAsleep,
-       !isConsoleSessionLocked(),
-       let studioID = displayID,
-       let builtinID = activeBuiltinDisplayID(),
-       let studioBrightness = displayBrightnessReader.percent(for: studioID),
-       let builtinBrightness = displayBrightnessReader.percent(for: builtinID) {
-        if displayBrightnessOffset == nil || lastBuiltinDisplayBrightness == nil || lastStudioDisplayBrightnessForLock == nil {
-            let isNewLock = displayBrightnessOffset == nil
-            if isNewLock {
-                displayBrightnessOffset = builtinBrightness - studioBrightness
-            }
-            lastBuiltinDisplayBrightness = builtinBrightness
-            lastStudioDisplayBrightnessForLock = studioBrightness
-            if isNewLock {
-                log("已锁定双屏亮度差：MacBook \(builtinBrightness)% / Studio Display \(studioBrightness)%")
-            }
-        } else if Date() >= displayBrightnessWriteSuppressedUntil,
-                  let offset = displayBrightnessOffset,
-                  let previousBuiltin = lastBuiltinDisplayBrightness,
-                  let previousStudio = lastStudioDisplayBrightnessForLock {
-            let builtinDelta = builtinBrightness - previousBuiltin
-            let studioDelta = studioBrightness - previousStudio
-            if builtinDelta != 0 || studioDelta != 0 {
-                if abs(builtinDelta) > abs(studioDelta) {
-                    let targetStudio = max(0, min(100, builtinBrightness - offset))
-                    if targetStudio == studioBrightness || displayBrightnessReader.setPercent(targetStudio, for: studioID) {
-                        lastBuiltinDisplayBrightness = builtinBrightness
-                        lastStudioDisplayBrightnessForLock = targetStudio
-                        displayBrightnessWriteSuppressedUntil = Date().addingTimeInterval(0.6)
-                    }
-                } else {
-                    let targetBuiltin = max(0, min(100, studioBrightness + offset))
-                    if targetBuiltin == builtinBrightness || displayBrightnessReader.setPercent(targetBuiltin, for: builtinID) {
-                        lastBuiltinDisplayBrightness = targetBuiltin
-                        lastStudioDisplayBrightnessForLock = studioBrightness
-                        displayBrightnessWriteSuppressedUntil = Date().addingTimeInterval(0.6)
-                    }
-                }
-            }
-        }
-    } else {
-        lastBuiltinDisplayBrightness = nil
-        lastStudioDisplayBrightnessForLock = nil
-    }
 
     if brightnessFollowEnabled, !isAsleep, let displayID,
        let displayBrightness = displayBrightnessReader.percent(for: displayID) {
@@ -3025,9 +2262,11 @@ private func pollDisplayAndLamp() {
     }
 }
 
-let pollingTimer = Timer.scheduledTimer(withTimeInterval: pollInterval, repeats: true) { _ in
+// 加入 common 模式，菜单展开时同步仍持续进行。
+let pollingTimer = Timer(timeInterval: pollInterval, repeats: true) { _ in
     pollDisplayAndLamp()
 }
 pollingTimer.tolerance = 0.05
+RunLoop.main.add(pollingTimer, forMode: .common)
 pollDisplayAndLamp()
 NSApplication.shared.run()
