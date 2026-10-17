@@ -5,11 +5,11 @@
 
 This repository is a fork of [rogerbush007-a11y/iScreenBar-StudioDisplay-Sync](https://github.com/rogerbush007-a11y/iScreenBar-StudioDisplay-Sync). It keeps only the lamp-related features and has a redesigned menu. It is an unofficial, independent project, not affiliated with BenQ or Apple, and released under the MIT licence.
 
-The interface is in English, with a Simplified Chinese translation that is used automatically when Chinese is your preferred macOS language. Chinese labels are shown in parentheses below.
+The interface is in English, with Simplified Chinese, Traditional Chinese, Japanese and Korean translations that follow your preferred macOS language. Simplified Chinese labels are shown in parentheses below.
 
 ## Changes in this fork
 
-- **English UI with Chinese translation**: follows your macOS language; previously the interface was Chinese only.
+- **Localized UI**: English, Simplified Chinese, Traditional Chinese, Japanese and Korean, following your macOS language; previously the interface was Chinese only.
 - **Native menu**: the popover is replaced by a standard macOS menu, with the lamp panel at the top, native submenus below and Quit (⌘Q). It follows light and dark mode.
 - **Lamp features only**: removed the built-in display switch and rotation, rotation presets, the Studio Display black overlay, keep-awake, the MacBook ↔ Studio Display brightness lock, and sleeping the displays on lock. The app no longer asks for an administrator password.
 - **Menu bar icon**: a monochrome ring with 8 rays that light up with brightness; a small dot appears at the bottom right when there is a sync problem.

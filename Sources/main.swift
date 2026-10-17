@@ -1344,7 +1344,7 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         brightnessFollowSwitch.target = self
         brightnessFollowSwitch.action = #selector(brightnessFollowChanged)
         timeTemperatureSwitch.detail = L("By time of day")
-        brightnessFollowSwitch.detail = L("Follows display")
+        brightnessFollowSwitch.detail = L("Tracks display")
         powerSyncSwitch.detail = L("Off on sleep")
         brightnessFollowSwitch.toolTip = L("Lamp brightness follows the Studio Display")
         powerSyncSwitch.toolTip = L("Turn the lamp off when the Studio Display sleeps")
@@ -1459,7 +1459,7 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         powerSwitch.state = lamp.isPowerOn == true ? .on : .off
         let autoLightChangePending = autoLightChangePendingUntil.map { Date() < $0 } ?? false
         if isAmbientPresenceLockActive {
-            autoLightSwitch.title = autoLightWasEnabledBeforeAmbientLock ? L("Auto Light Paused") : L("Auto Light")
+            autoLightSwitch.title = autoLightWasEnabledBeforeAmbientLock ? L("Light Paused") : L("Auto Light")
             autoLightSwitch.state = autoLightWasEnabledBeforeAmbientLock ? .on : .off
             autoLightSwitch.toolTip = autoLightWasEnabledBeforeAmbientLock
                 ? L("Paused while ambient light keeps the lamp off; resumes automatically")
@@ -1483,7 +1483,7 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         }
         if isAmbientPresenceLockActive || isScreenSleepPresenceLockActive {
             let wasEnabled = presenceWasEnabledBeforeAmbientLock || presenceWasEnabledBeforeScreenSleep
-            presenceSwitch.title = wasEnabled ? L("Presence Paused") : L("Presence")
+            presenceSwitch.title = wasEnabled ? L("Detect Paused") : L("Presence")
             presenceSwitch.state = wasEnabled ? .on : .off
             presenceSwitch.toolTip = wasEnabled
                 ? L("Paused while the lamp is held off; resumes automatically")

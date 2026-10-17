@@ -10,7 +10,7 @@
 "Ambient light not calibrated" = "尚未完成环境标定";
 "Auto Color" = "自动色温";
 "Auto Light" = "自动感光";
-"Auto Light Paused" = "感光暂停";
+"Light Paused" = "感光暂停";
 "Auto light can’t be turned on while ambient light keeps the lamp off" = "环境关灯锁定期间不可开启自动感光";
 "Away Time" = "离席时间";
 "Bind" = "绑定";
@@ -25,7 +25,7 @@
 "Dim: On" = "昏暗开灯";
 "Fill light for video calls" = "视频会议补光模式";
 "Follow Display" = "亮度跟随";
-"Follows display" = "跟随显示器";
+"Tracks display" = "跟随显示器";
 "High" = "高";
 "In sync" = "同步正常";
 "Lamp brightness follows the Studio Display" = "灯光亮度跟随 Studio Display";
@@ -46,7 +46,7 @@
 "Paused while ambient light keeps the lamp off; resumes automatically" = "原设置已开启；环境关灯锁定期间临时暂停，解除后自动恢复";
 "Paused while the lamp is held off; resumes automatically" = "原设置已开启；关灯锁定期间临时暂停，解除后自动恢复";
 "Presence" = "入座检测";
-"Presence Paused" = "入座暂停";
+"Detect Paused" = "入座暂停";
 "Presence Settings" = "入座检测设置";
 "Presence detection can’t be turned on while the lamp is held off" = "关灯锁定期间不可开启入座检测";
 "Quickly switch between lighting scenes" = "快速切换预设灯光场景";
