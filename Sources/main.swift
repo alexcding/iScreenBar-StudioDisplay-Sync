@@ -35,6 +35,11 @@ private enum UIStyle {
     static let chipOffColor = adaptiveColor(light: NSColor(white: 0, alpha: 0.08), dark: NSColor(white: 1, alpha: 0.14))
 }
 
+/// 界面文字以英文为键，从 Localizable.strings 读取当前系统语言的翻译（如 zh-Hans）。
+private func L(_ key: String) -> String {
+    NSLocalizedString(key, comment: "")
+}
+
 private func adaptiveColor(light: NSColor, dark: NSColor) -> NSColor {
     NSColor(name: nil) { $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light }
 }
@@ -189,7 +194,7 @@ private func brightnessStatusIcon(level: Int, warning: Bool) -> NSImage {
         return true
     }
     image.isTemplate = true
-    image.accessibilityDescription = "iScreenBar 亮度 \(level)%" + (warning ? "，同步异常" : "")
+    image.accessibilityDescription = String(format: L("iScreenBar brightness %d%%"), level) + (warning ? L(", sync error") : "")
     return image
 }
 
@@ -260,8 +265,13 @@ private final class FeatureButton: NSButton {
             let textWidth = bounds.width - textX - 6
             let note = isOn ? detail : nil
             let titleY = note == nil ? (bounds.height - 15) / 2 : (bounds.height - 29) / 2
+            // 标题过长时逐级缩小字号（最小 10.5 pt），避免英文等较长文字被截断。
+            let titleFont = [12, 11.5, 11, 10.5].lazy
+                .map { NSFont.systemFont(ofSize: $0, weight: .semibold) }
+                .first { (self.title as NSString).size(withAttributes: [.font: $0]).width <= textWidth }
+                ?? .systemFont(ofSize: 10.5, weight: .semibold)
             drawText(title, in: NSRect(x: textX, y: titleY, width: textWidth, height: 15),
-                     font: .systemFont(ofSize: 12, weight: .semibold), color: .labelColor)
+                     font: titleFont, color: .labelColor)
             if let note {
                 drawText(note, in: NSRect(x: textX, y: titleY + 15, width: textWidth, height: 14),
                          font: .systemFont(ofSize: 11), color: .secondaryLabelColor)
@@ -420,31 +430,31 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
     private let powerSwitch: FeatureButton = {
         let button = FeatureButton(title: "", symbol: "power", accentColor: activeControlColor)
         button.style = .circle
-        button.setAccessibilityLabel("灯光开关")
+        button.setAccessibilityLabel(L("Light power"))
         return button
     }()
     private let statusDot = StatusDot()
-    private let connectionLabel = NSTextField(labelWithString: "未连接")
+    private let connectionLabel = NSTextField(labelWithString: L("Not connected"))
     private let brightnessSlider = InteractiveSlider(value: 50, minValue: 1, maxValue: 100, track: .brightness)
     private let temperatureSlider = InteractiveSlider(value: 5000, minValue: 2700, maxValue: 6500, track: .temperature)
-    private let timeTemperatureSwitch = FeatureButton(title: "自动色温", symbol: "circle.lefthalf.filled", accentColor: activeControlColor)
-    private let autoLightSwitch = FeatureButton(title: "自动感光", symbol: "sun.max", accentColor: activeControlColor)
-    private let presenceSwitch = FeatureButton(title: "入座检测", symbol: "figure.seated.side", accentColor: activeControlColor)
+    private let timeTemperatureSwitch = FeatureButton(title: L("Auto Color"), symbol: "circle.lefthalf.filled", accentColor: activeControlColor)
+    private let autoLightSwitch = FeatureButton(title: L("Auto Light"), symbol: "sun.max", accentColor: activeControlColor)
+    private let presenceSwitch = FeatureButton(title: L("Presence"), symbol: "figure.seated.side", accentColor: activeControlColor)
     private let presenceDelayPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let presenceSensitivityPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private var presenceDelaySeconds = 180
     private var presenceSensitivity = 2
-    private let videoModeSwitch = FeatureButton(title: "视频模式", symbol: "video", accentColor: activeControlColor)
-    private let modeButton = NSButton(title: "我的最爱", target: nil, action: nil)
+    private let videoModeSwitch = FeatureButton(title: L("Video Mode"), symbol: "video", accentColor: activeControlColor)
+    private let modeButton = NSButton(title: L("My Favorite"), target: nil, action: nil)
     private var modeCenterWindow: NSWindow?
-    private let brightnessFollowSwitch = FeatureButton(title: "亮度跟随", symbol: "display", accentColor: activeControlColor)
-    private let powerSyncSwitch = FeatureButton(title: "熄屏同步", symbol: "moon.zzz", accentColor: activeControlColor)
-    private let captureBrightButton = FeatureButton(title: "明亮关灯", symbol: "sun.max.fill", accentColor: .systemOrange)
-    private let captureDarkButton = FeatureButton(title: "昏暗开灯", symbol: "moon.fill", accentColor: .systemBlue)
+    private let brightnessFollowSwitch = FeatureButton(title: L("Follow Display"), symbol: "display", accentColor: activeControlColor)
+    private let powerSyncSwitch = FeatureButton(title: L("Sleep Sync"), symbol: "moon.zzz", accentColor: activeControlColor)
+    private let captureBrightButton = FeatureButton(title: L("Bright: Off"), symbol: "sun.max.fill", accentColor: .systemOrange)
+    private let captureDarkButton = FeatureButton(title: L("Dim: On"), symbol: "moon.fill", accentColor: .systemBlue)
     private let ambientEnableSwitch = AccentSwitch()
     private let brightThresholdLabel = NSTextField(labelWithString: "--")
     private let darkThresholdLabel = NSTextField(labelWithString: "--")
-    private let ambientStatusLabel = NSTextField(labelWithString: "尚未完成环境标定")
+    private let ambientStatusLabel = NSTextField(labelWithString: L("Ambient light not calibrated"))
     private(set) var isBrightnessFollowEnabled: Bool
     private(set) var isPowerSyncEnabled: Bool
     private(set) var isTimeTemperatureEnabled: Bool
@@ -520,7 +530,7 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         let displayState = isAsleep ? "Studio Display 已熄屏" : "Studio Display 已唤醒"
         let brightnessStatus = isBrightnessFollowEnabled ? "亮度跟随已开启" : "亮度跟随已关闭"
         let powerStatus = isPowerSyncEnabled ? "熄屏同步已开启" : "熄屏同步已关闭"
-        let status = healthy ? "同步正常" : "同步异常"
+        let status = healthy ? L("In sync") : L("Sync error")
         _ = (displayState, brightnessStatus, powerStatus)
         let brightnessText = healthy ? lamp.currentBrightness.map { "\($0)%" } ?? "--%" : "--%"
         let temperatureText = healthy ? lamp.currentTemperature.map { "\($0)K" } ?? "----K" : "----K"
@@ -553,7 +563,7 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         menu.addItem(modePresetMenuItem())
 
         menu.addItem(.separator())
-        let quit = NSMenuItem(title: "退出 iScreen Menu", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        let quit = NSMenuItem(title: L("Quit iScreen Menu"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.target = NSApp
         menu.addItem(quit)
     }
@@ -584,11 +594,11 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
     }
 
     private func presenceMenuItem() -> NSMenuItem {
-        let parent = NSMenuItem(title: "入座检测设置", action: nil, keyEquivalent: "")
-        parent.image = NSImage(systemSymbolName: "figure.seated.side", accessibilityDescription: "入座检测")
+        let parent = NSMenuItem(title: L("Presence Settings"), action: nil, keyEquivalent: "")
+        parent.image = NSImage(systemSymbolName: "figure.seated.side", accessibilityDescription: L("Presence"))
         parent.isEnabled = presenceDelayPopup.isEnabled
         let submenu = NSMenu()
-        for (title, popup) in [("离席时间", presenceDelayPopup), ("侦测灵敏度", presenceSensitivityPopup)] {
+        for (title, popup) in [(L("Away Time"), presenceDelayPopup), (L("Sensitivity"), presenceSensitivityPopup)] {
             submenu.addItem(.sectionHeader(title: title))
             for option in popup.itemArray {
                 let item = NSMenuItem(title: option.title, action: #selector(popupOptionSelected(_:)), keyEquivalent: "")
@@ -604,16 +614,16 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
     }
 
     private func ambientMenuItem() -> NSMenuItem {
-        let parent = NSMenuItem(title: "环境光标定", action: nil, keyEquivalent: "")
-        parent.image = NSImage(systemSymbolName: "sun.horizon", accessibilityDescription: "环境光标定")
+        let parent = NSMenuItem(title: L("Ambient Light Calibration"), action: nil, keyEquivalent: "")
+        parent.image = NSImage(systemSymbolName: "sun.horizon", accessibilityDescription: L("Ambient Light Calibration"))
         let submenu = NSMenu()
         submenu.autoenablesItems = false
-        submenu.addItem(menuItem(for: ambientEnableSwitch, title: "按环境光自动开关灯"))
+        submenu.addItem(menuItem(for: ambientEnableSwitch, title: L("Turn Light On/Off by Ambient Light")))
         submenu.addItem(.separator())
         submenu.addItem(menuItem(for: captureBrightButton, toggle: false,
-                                 title: "记录当前光线为关灯点（\(brightThresholdLabel.stringValue)）"))
+                                 title: String(format: L("Set Current Light as Off Point (%@)"), brightThresholdLabel.stringValue)))
         submenu.addItem(menuItem(for: captureDarkButton, toggle: false,
-                                 title: "记录当前光线为开灯点（\(darkThresholdLabel.stringValue)）"))
+                                 title: String(format: L("Set Current Light as On Point (%@)"), darkThresholdLabel.stringValue)))
         submenu.addItem(.separator())
         let status = NSMenuItem(title: ambientStatusLabel.stringValue, action: nil, keyEquivalent: "")
         status.isEnabled = false
@@ -624,8 +634,8 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
     }
 
     private func modePresetMenuItem() -> NSMenuItem {
-        let parent = NSMenuItem(title: "灯光预设：\(modeButton.title)", action: nil, keyEquivalent: "")
-        parent.image = NSImage(systemSymbolName: "lightbulb", accessibilityDescription: "灯光预设")
+        let parent = NSMenuItem(title: String(format: L("Light Preset: %@"), modeButton.title), action: nil, keyEquivalent: "")
+        parent.image = NSImage(systemSymbolName: "lightbulb", accessibilityDescription: L("Light Presets"))
         let submenu = NSMenu()
         for (index, title) in modeNames().enumerated() {
             let item = NSMenuItem(title: title, action: #selector(presetChanged(_:)), keyEquivalent: "")
@@ -635,7 +645,7 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
             submenu.addItem(item)
         }
         submenu.addItem(.separator())
-        let center = NSMenuItem(title: "模式中心设置…", action: #selector(showModeCenter), keyEquivalent: "")
+        let center = NSMenuItem(title: L("Mode Center…"), action: #selector(showModeCenter), keyEquivalent: "")
         center.target = self
         submenu.addItem(center)
         parent.submenu = submenu
@@ -653,7 +663,7 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
     @objc private func captureBrightThreshold() {
         guard let value = currentDisplayAmbientProxy else {
             captureBrightButton.state = .off
-            ambientStatusLabel.stringValue = "暂时无法读取 Studio Display 光线传感器"
+            ambientStatusLabel.stringValue = L("Cannot read the Studio Display light sensor right now")
             NSSound.beep()
             return
         }
@@ -669,7 +679,7 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
     @objc private func captureDarkThreshold() {
         guard let value = currentDisplayAmbientProxy else {
             captureDarkButton.state = .off
-            ambientStatusLabel.stringValue = "暂时无法读取 Studio Display 光线传感器"
+            ambientStatusLabel.stringValue = L("Cannot read the Studio Display light sensor right now")
             NSSound.beep()
             return
         }
@@ -854,11 +864,11 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         ambientEnableSwitch.state = areAmbientRulesEnabled ? .on : .off
         ambientEnableSwitch.isEnabled = currentDisplayAmbientProxy != nil &&
             (ambientCloseThreshold != nil || ambientOpenThreshold != nil)
-        let currentText = currentDisplayAmbientProxy.map { "当前环境 \($0)" } ?? "当前环境 --"
+        let currentText = currentDisplayAmbientProxy.map { String(format: L("Ambient %d"), $0) } ?? L("Ambient --")
         if let close = ambientCloseThreshold, let open = ambientOpenThreshold, open >= close {
-            ambientStatusLabel.stringValue = "\(currentText)  ·  阈值重叠，可能反复开关"
+            ambientStatusLabel.stringValue = "\(currentText)  ·  " + L("Thresholds overlap; the light may toggle repeatedly")
         } else if !areAmbientRulesEnabled, ambientCloseThreshold != nil || ambientOpenThreshold != nil {
-            ambientStatusLabel.stringValue = "\(currentText)  ·  已保存，未启用"
+            ambientStatusLabel.stringValue = "\(currentText)  ·  " + L("Saved, not enabled")
         } else {
             ambientStatusLabel.stringValue = currentText
         }
@@ -1075,7 +1085,7 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
     }
 
     private func modeNames() -> [String] {
-        var names = ["我的最爱", "夜间工作", "睡前放松"]
+        var names = [L("My Favorite"), L("Night Work"), L("Wind Down")]
         if let data = UserDefaults.standard.data(forKey: "savedCustomMode"),
            let mode = try? JSONDecoder().decode(SavedMode.self, from: data),
            !names.contains(mode.name) {
@@ -1092,10 +1102,10 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         }
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 270),
                               styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
-        window.title = "模式中心"
-        let title = NSTextField(labelWithString: "模式中心")
+        window.title = L("Mode Center")
+        let title = NSTextField(labelWithString: L("Mode Center"))
         title.font = .systemFont(ofSize: 20, weight: .semibold)
-        let subtitle = NSTextField(labelWithString: "快速切换预设灯光场景")
+        let subtitle = NSTextField(labelWithString: L("Quickly switch between lighting scenes"))
         subtitle.font = UIStyle.bodyFont
         subtitle.textColor = .secondaryLabelColor
         let rows = NSStackView()
@@ -1137,11 +1147,11 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
             ])
             rows.addArrangedSubview(row)
         }
-        let add = NSButton(title: "新增场景模式", target: self, action: #selector(saveCurrentMode))
+        let add = NSButton(title: L("Add Scene"), target: self, action: #selector(saveCurrentMode))
         add.bezelStyle = .rounded
         add.image = NSImage(systemSymbolName: "plus", accessibilityDescription: nil)
         add.imagePosition = .imageLeading
-        let bind = NSButton(title: "绑定应用", target: self, action: #selector(bindCurrentModeToApp))
+        let bind = NSButton(title: L("Bind to App"), target: self, action: #selector(bindCurrentModeToApp))
         bind.bezelStyle = .rounded
         bind.image = NSImage(systemSymbolName: "app.badge", accessibilityDescription: nil)
         bind.imagePosition = .imageLeading
@@ -1197,15 +1207,15 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
             return
         }
         let alert = NSAlert()
-        alert.messageText = "保存新模式"
-        alert.informativeText = "记录当前亮度、色温和视频模式。"
-        let field = NSTextField(string: "我的模式")
+        alert.messageText = L("Save New Mode")
+        alert.informativeText = L("Saves the current brightness, color temperature and video mode.")
+        let field = NSTextField(string: L("My Mode"))
         field.frame = NSRect(x: 0, y: 0, width: 240, height: 24)
         alert.accessoryView = field
-        alert.addButton(withTitle: "保存")
-        alert.addButton(withTitle: "取消")
+        alert.addButton(withTitle: L("Save"))
+        alert.addButton(withTitle: L("Cancel"))
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        let mode = SavedMode(name: field.stringValue.isEmpty ? "我的模式" : field.stringValue,
+        let mode = SavedMode(name: field.stringValue.isEmpty ? L("My Mode") : field.stringValue,
                              brightness: brightness,
                              temperature: temperature,
                              videoMode: lamp.isVideoModeEnabled == true)
@@ -1222,8 +1232,8 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         guard let brightness = lamp.currentBrightness,
               let temperature = lamp.currentTemperature else { return }
         let panel = NSOpenPanel()
-        panel.title = "选择要绑定的应用"
-        panel.prompt = "绑定"
+        panel.title = L("Choose an App to Bind")
+        panel.prompt = L("Bind")
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
         panel.allowedContentTypes = [.application]
@@ -1300,14 +1310,14 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         temperatureSlider.isContinuous = false
         timeTemperatureSwitch.target = self
         timeTemperatureSwitch.action = #selector(timeTemperatureChanged)
-        timeTemperatureSwitch.toolTip = "根据当前时间自动调整色温"
+        timeTemperatureSwitch.toolTip = L("Adjust color temperature automatically by time of day")
         autoLightSwitch.target = self
         autoLightSwitch.action = #selector(autoLightChanged)
-        autoLightSwitch.toolTip = "使用官方 HID 切换指令开启或关闭自动感光"
+        autoLightSwitch.toolTip = L("Turn the lamp’s auto light sensor on or off")
         presenceSwitch.target = self
         presenceSwitch.action = #selector(presenceChanged)
         for seconds in presenceDelayOptions {
-            let title = "\(seconds / 60) 分钟"
+            let title = String(format: L("%d min"), seconds / 60)
             let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
             item.tag = seconds
             presenceDelayPopup.menu?.addItem(item)
@@ -1315,7 +1325,7 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         presenceDelayPopup.target = self
         presenceDelayPopup.action = #selector(presenceDelayChanged)
         selectPresenceDelay(presenceDelaySeconds)
-        for (title, value) in [("低", 0), ("中", 1), ("高", 2)] {
+        for (title, value) in [(L("Low"), 0), (L("Medium"), 1), (L("High"), 2)] {
             let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
             item.tag = value
             presenceSensitivityPopup.menu?.addItem(item)
@@ -1333,22 +1343,22 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         modeButton.font = UIStyle.bodyFont
         brightnessFollowSwitch.target = self
         brightnessFollowSwitch.action = #selector(brightnessFollowChanged)
-        timeTemperatureSwitch.detail = "随时间调整"
-        brightnessFollowSwitch.detail = "跟随显示器"
-        powerSyncSwitch.detail = "熄屏时关灯"
-        brightnessFollowSwitch.toolTip = "灯光亮度跟随 Studio Display"
-        powerSyncSwitch.toolTip = "Studio Display 熄屏时关灯"
-        videoModeSwitch.toolTip = "视频会议补光模式"
+        timeTemperatureSwitch.detail = L("By time of day")
+        brightnessFollowSwitch.detail = L("Follows display")
+        powerSyncSwitch.detail = L("Off on sleep")
+        brightnessFollowSwitch.toolTip = L("Lamp brightness follows the Studio Display")
+        powerSyncSwitch.toolTip = L("Turn the lamp off when the Studio Display sleeps")
+        videoModeSwitch.toolTip = L("Fill light for video calls")
         powerSyncSwitch.target = self
         powerSyncSwitch.action = #selector(powerSyncChanged)
         captureBrightButton.target = self
         captureBrightButton.action = #selector(captureBrightThreshold)
         captureBrightButton.setButtonType(.momentaryPushIn)
-        captureBrightButton.toolTip = "点击后将当前环境值保存为明亮关灯点"
+        captureBrightButton.toolTip = L("Save the current ambient value as the bright turn-off point")
         captureDarkButton.target = self
         captureDarkButton.action = #selector(captureDarkThreshold)
         captureDarkButton.setButtonType(.momentaryPushIn)
-        captureDarkButton.toolTip = "点击后将当前环境值保存为昏暗开灯点"
+        captureDarkButton.toolTip = L("Save the current ambient value as the dim turn-on point")
         ambientEnableSwitch.target = self
         ambientEnableSwitch.action = #selector(ambientEnableChanged)
         for label in [brightThresholdLabel, darkThresholdLabel] {
@@ -1449,39 +1459,39 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         powerSwitch.state = lamp.isPowerOn == true ? .on : .off
         let autoLightChangePending = autoLightChangePendingUntil.map { Date() < $0 } ?? false
         if isAmbientPresenceLockActive {
-            autoLightSwitch.title = autoLightWasEnabledBeforeAmbientLock ? "感光暂停" : "自动感光"
+            autoLightSwitch.title = autoLightWasEnabledBeforeAmbientLock ? L("Auto Light Paused") : L("Auto Light")
             autoLightSwitch.state = autoLightWasEnabledBeforeAmbientLock ? .on : .off
             autoLightSwitch.toolTip = autoLightWasEnabledBeforeAmbientLock
-                ? "原设置已开启；环境关灯锁定期间临时暂停，解除后自动恢复"
-                : "环境关灯锁定期间不可开启自动感光"
+                ? L("Paused while ambient light keeps the lamp off; resumes automatically")
+                : L("Auto light can’t be turned on while ambient light keeps the lamp off")
         } else if autoLightChangePending, let pendingAutoLightState {
-            autoLightSwitch.title = "自动感光"
+            autoLightSwitch.title = L("Auto Light")
             autoLightSwitch.state = pendingAutoLightState ? .on : .off
-            autoLightSwitch.toolTip = pendingAutoLightState ? "正在开启自动感光" : "正在关闭自动感光"
+            autoLightSwitch.toolTip = pendingAutoLightState ? L("Turning auto light on") : L("Turning auto light off")
         } else if lamp.isAutoLightEnabled == true {
-            autoLightSwitch.title = "自动感光"
+            autoLightSwitch.title = L("Auto Light")
             autoLightChangePendingUntil = nil
             pendingAutoLightState = nil
             autoLightSwitch.state = .on
-            autoLightSwitch.toolTip = "关闭自动感光"
+            autoLightSwitch.toolTip = L("Turn auto light off")
         } else {
-            autoLightSwitch.title = "自动感光"
+            autoLightSwitch.title = L("Auto Light")
             autoLightChangePendingUntil = nil
             pendingAutoLightState = nil
             autoLightSwitch.state = .off
-            autoLightSwitch.toolTip = "开启自动感光"
+            autoLightSwitch.toolTip = L("Turn auto light on")
         }
         if isAmbientPresenceLockActive || isScreenSleepPresenceLockActive {
             let wasEnabled = presenceWasEnabledBeforeAmbientLock || presenceWasEnabledBeforeScreenSleep
-            presenceSwitch.title = wasEnabled ? "入座暂停" : "入座检测"
+            presenceSwitch.title = wasEnabled ? L("Presence Paused") : L("Presence")
             presenceSwitch.state = wasEnabled ? .on : .off
             presenceSwitch.toolTip = wasEnabled
-                ? "原设置已开启；关灯锁定期间临时暂停，解除后自动恢复"
-                : "关灯锁定期间不可开启入座检测"
+                ? L("Paused while the lamp is held off; resumes automatically")
+                : L("Presence detection can’t be turned on while the lamp is held off")
         } else {
-            presenceSwitch.title = "入座检测"
+            presenceSwitch.title = L("Presence")
             presenceSwitch.state = lamp.isPresenceDetectionEnabled == true ? .on : .off
-            presenceSwitch.toolTip = "开启或关闭灯体入座检测"
+            presenceSwitch.toolTip = L("Turn the lamp’s presence detection on or off")
         }
         videoModeSwitch.state = lamp.isVideoModeEnabled == true ? .on : .off
         brightnessFollowSwitch.state = isBrightnessFollowEnabled ? .on : .off
@@ -1499,21 +1509,21 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         let enabled = lamp.isConnected
         powerSwitch.isEnabled = enabled
         let presencePaused = isAmbientPresenceLockActive || isScreenSleepPresenceLockActive
-        presenceSwitch.detail = presencePaused ? "已暂停" : "离席 \(presenceDelaySeconds / 60) 分钟"
+        presenceSwitch.detail = presencePaused ? L("Paused") : String(format: L("%d min away"), presenceDelaySeconds / 60)
         if !enabled {
             statusDot.color = .tertiaryLabelColor
-            connectionLabel.stringValue = "未连接"
+            connectionLabel.stringValue = L("Not connected")
         } else if !isHealthy {
             statusDot.color = .systemOrange
-            connectionLabel.stringValue = "同步异常"
+            connectionLabel.stringValue = L("Sync error")
         } else {
             statusDot.color = .systemGreen
             switch lamp.isPowerOn {
             case true?:
                 let values = [lamp.currentBrightness.map { "\($0)%" }, lamp.currentTemperature.map { "\($0)K" }]
-                connectionLabel.stringValue = (["已连接"] + values.compactMap { $0 }).joined(separator: " · ")
-            case false?: connectionLabel.stringValue = "已连接 · 灯已关闭"
-            case nil: connectionLabel.stringValue = "已连接"
+                connectionLabel.stringValue = ([L("Connected")] + values.compactMap { $0 }).joined(separator: " · ")
+            case false?: connectionLabel.stringValue = L("Connected · Light off")
+            case nil: connectionLabel.stringValue = L("Connected")
             }
         }
         autoLightSwitch.isEnabled = enabled && !isAmbientPresenceLockActive
