@@ -141,11 +141,10 @@ private final class InteractiveSlider: NSSlider {
     /// 拖动期间为 true，状态刷新不应覆盖用户正在拖动的值。
     private(set) var isTracking = false
 
-    // 自行跟踪拖动，使整条胶囊都可点按；松开时才发送 action。
+    // 自行跟踪拖动，使整条胶囊都可点按；isContinuous 时拖动中也发送 action，松开时总会发送。
     override func mouseDown(with event: NSEvent) {
         guard isEnabled else { return }
         isTracking = true
-        defer { isTracking = false }
         func update(with event: NSEvent) {
             let point = convert(event.locationInWindow, from: nil)
             // 色温标记绘制时左右各内缩 8 pt 并以标记中心定位，命中区域与之一致。
@@ -159,6 +158,8 @@ private final class InteractiveSlider: NSSlider {
             update(with: next)
             if next.type == .leftMouseUp { break }
         }
+        // 先结束跟踪再发送最终 action，接收方可据此区分拖动中与松开。
+        isTracking = false
         sendAction(action, to: target)
     }
 }
@@ -470,6 +471,8 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
     private var pendingAutoLightState: Bool?
     private var lastScheduledTemperature: Int?
     private var lastScheduledTemperatureChangeAt = Date.distantPast
+    private var lastDragTemperatureSentAt = Date.distantPast
+    private var lastDragBrightnessSentAt = Date.distantPast
     private var lastFrontmostBundleID: String?
     private var isAmbientPresenceLockActive = false
     private var presenceWasEnabledBeforeAmbientLock = false
@@ -881,6 +884,18 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
 
     @objc private func brightnessChanged() {
         let value = Int(brightnessSlider.doubleValue.rounded())
+        // 与色温相同：拖动中按节流间隔写入亮度，松开时再刷新界面并回读状态。
+        if brightnessSlider.isTracking {
+            let now = Date()
+            guard value != lamp.currentBrightness,
+                  now.timeIntervalSince(lastDragBrightnessSentAt) >= 0.05 else { return }
+            lastDragBrightnessSentAt = now
+            withLampOn("brightness") { [weak self] in
+                _ = self?.lamp.setBrightness(value)
+            }
+            return
+        }
+        lastDragBrightnessSentAt = .distantPast
         withLampOn("brightness") { [weak self] in
             guard let self else { return }
             _ = self.lamp.setBrightness(value)
@@ -891,7 +906,19 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
 
     @objc private func temperatureChanged() {
         let value = Int((temperatureSlider.doubleValue / 100).rounded()) * 100
+        // 拖动中标记随指针连续移动，只按节流间隔写入色温，让灯实时跟随；松开时再对齐、刷新界面并回读状态。
+        if temperatureSlider.isTracking {
+            let now = Date()
+            guard value != lamp.currentTemperature,
+                  now.timeIntervalSince(lastDragTemperatureSentAt) >= 0.05 else { return }
+            lastDragTemperatureSentAt = now
+            withLampOn("temperature") { [weak self] in
+                _ = self?.lamp.setTemperature(value)
+            }
+            return
+        }
         temperatureSlider.doubleValue = Double(value)
+        lastDragTemperatureSentAt = .distantPast
         withLampOn("temperature") { [weak self] in
             guard let self else { return }
             _ = self.lamp.setTemperature(value)
@@ -1304,10 +1331,10 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         powerSwitch.action = #selector(powerChanged)
         brightnessSlider.target = self
         brightnessSlider.action = #selector(brightnessChanged)
-        brightnessSlider.isContinuous = false
+        brightnessSlider.isContinuous = true
         temperatureSlider.target = self
         temperatureSlider.action = #selector(temperatureChanged)
-        temperatureSlider.isContinuous = false
+        temperatureSlider.isContinuous = true
         timeTemperatureSwitch.target = self
         timeTemperatureSwitch.action = #selector(timeTemperatureChanged)
         timeTemperatureSwitch.toolTip = L("Adjust color temperature automatically by time of day")
