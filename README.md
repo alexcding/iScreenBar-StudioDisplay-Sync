@@ -1,37 +1,40 @@
 # iScreen Menu
-**菜单栏里的 BenQ iScreenBar 灯控：亮度、色温、自动感光，以及与 Studio Display 的熄屏同步和亮度跟随。**
+**BenQ iScreenBar control from the macOS menu bar: brightness, colour temperature, auto light, plus Studio Display sleep sync and brightness follow.**
 
-<img src="docs/images/menu.png" alt="iScreen Menu 菜单面板" width="345"> <img src="docs/images/menu-bar-icon.png" alt="菜单栏图标" width="36">
+<img src="docs/images/menu.png" alt="iScreen Menu panel" width="345"> <img src="docs/images/menu-bar-icon.png" alt="Menu bar icon" width="36">
 
-本仓库 fork 自 [rogerbush007-a11y/iScreenBar-StudioDisplay-Sync](https://github.com/rogerbush007-a11y/iScreenBar-StudioDisplay-Sync)，只保留与灯光相关的功能，并重做了菜单界面。非官方独立项目，与 BenQ、Apple 无隶属关系，以 MIT 许可证发布。
+This repository is a fork of [rogerbush007-a11y/iScreenBar-StudioDisplay-Sync](https://github.com/rogerbush007-a11y/iScreenBar-StudioDisplay-Sync). It keeps only the lamp-related features and has a redesigned menu. It is an unofficial, independent project, not affiliated with BenQ or Apple, and released under the MIT licence.
 
-## 本 fork 的改动
+The interface is in English, with a Simplified Chinese translation that is used automatically when Chinese is your preferred macOS language. Chinese labels are shown in parentheses below.
 
-- **原生菜单界面**：弹出气泡改为系统菜单；顶部为灯光面板，下方为原生子菜单与“退出”（⌘Q），自动适配浅色/深色模式。
-- **只保留灯光功能**：移除内屏开关与旋转、旋转预设、Studio Display 黑色遮罩、防止休眠、MacBook 与 Studio Display 双屏亮度锁定、锁屏时立即熄屏。App 不再请求管理员权限。
-- **菜单栏图标**：单色圆环，周围 8 条光芒按亮度依次点亮；同步异常时右下角显示小圆点。
-- **Studio Display 识别**：除型号 0xAE46 外，也识别 0xAE3A 及名称为 “Studio Display” 的屏幕；此前部分 Studio Display 无法识别，熄屏同步与亮度跟随不会生效。
-- **灯关闭时也可调节**：拖动亮度/色温或切换自动感光、应用灯光预设时先开灯再写入（灯关闭时固件会忽略这些指令）。
-- **稳定性**：菜单展开时同步与状态回读不中断；从菜单退出后不再被 LaunchAgent 自动拉起，仅在异常退出时重启；声明最低系统版本 macOS 14。
+## Changes in this fork
 
-## 界面与功能
+- **English UI with Chinese translation**: follows your macOS language; previously the interface was Chinese only.
+- **Native menu**: the popover is replaced by a standard macOS menu, with the lamp panel at the top, native submenus below and Quit (⌘Q). It follows light and dark mode.
+- **Lamp features only**: removed the built-in display switch and rotation, rotation presets, the Studio Display black overlay, keep-awake, the MacBook ↔ Studio Display brightness lock, and sleeping the displays on lock. The app no longer asks for an administrator password.
+- **Menu bar icon**: a monochrome ring with 8 rays that light up with brightness; a small dot appears at the bottom right when there is a sync problem.
+- **Studio Display detection**: besides model 0xAE46, model 0xAE3A and any screen named "Studio Display" are recognised. Previously some Studio Displays were not detected, so sleep sync and brightness follow silently did nothing.
+- **Adjust while the lamp is off**: changing brightness, colour temperature or auto light, or applying a light preset, turns the lamp on first and then applies the change (the firmware ignores these commands while the lamp is off).
+- **Reliability**: sync and status updates keep running while the menu is open; choosing Quit keeps the app closed (the LaunchAgent only restarts it after a crash); the minimum system version is declared as macOS 14.
 
-详见 [界面使用指南](docs/UI-GUIDE.zh-CN.md) · [完整功能清单](docs/FEATURES.zh-CN.md)。
+## Interface and features
 
-| 区域 | 功能 |
+See the [UI guide](docs/UI-GUIDE.md) and the [full feature list](docs/FEATURES.md).
+
+| Area | What it does |
 | --- | --- |
-| 顶部 | 连接状态、当前亮度与色温；右侧圆形按钮开关灯 |
-| 滑块 | 亮度（白色填充）与 2700–6500K 色温（暖到冷渐变）；自动感光开启时亮度滑块置灰，自动色温开启时色温滑块置灰 |
-| 开关 | 自动感光、自动色温、入座检测、视频模式、亮度跟随、熄屏同步 |
-| 子菜单 | 入座检测设置（离席时间、灵敏度）、环境光标定、灯光预设与模式中心 |
+| Header | Connection status, current brightness and colour temperature; the round button on the right turns the lamp on or off |
+| Sliders | Brightness and 2700–6500K colour temperature. The brightness slider is disabled while Auto Light is on; the colour slider is disabled while Auto Color is on |
+| Toggles | Auto Light (自动感光), Auto Color (自动色温), Presence (入座检测), Video Mode (视频模式), Follow Display (亮度跟随), Sleep Sync (熄屏同步) |
+| Submenus | Presence settings (away time, sensitivity), Ambient light calibration, Light presets and Mode Center |
 
-App 不占 Dock 位置，悬停图标显示亮度和色温。
+The app has no Dock icon. Hover over the menu bar icon to see brightness and colour temperature.
 
-## 安装
+## Installation
 
-已测试：Apple Silicon Mac、macOS 26–27、Studio Display、BenQ iScreenBar（USB VID 0x04A5 / PID 0x2501）。其他系统和设备尚未全面验证；需要 macOS 14 或更高版本。
+Tested on Apple Silicon Macs with macOS 26–27, Apple Studio Display and BenQ iScreenBar (USB VID 0x04A5 / PID 0x2501). Other systems and devices have not been fully verified. Requires macOS 14 or later.
 
-先安装 Xcode Command Line Tools，然后运行：
+Install the Xcode Command Line Tools, then run:
 
 ```bash
 xcode-select --install
@@ -40,17 +43,17 @@ cd iScreenBar-StudioDisplay-Sync
 ./scripts/install.sh
 ```
 
-脚本本机编译、临时签名，安装到 `~/Applications/iScreen Menu.app`，创建用户级 LaunchAgent，登录后自动运行。安装和使用都不需要管理员密码。
+The script compiles locally, signs ad hoc, installs to `~/Applications/iScreen Menu.app` and creates a per-user LaunchAgent so the app starts at login. Neither installing nor using the app needs an administrator password.
 
-日常灯控直接通过 USB HID 执行，不依赖官方 App。建议避免两个软件同时自动写入灯光设置。相机自动视频模式和灯体硬件记忆尚未完全对齐，不宣称完整替代官方所有功能。
+Lamp control talks to the lamp directly over USB HID and does not depend on the official app. Avoid running two programs that both write lamp settings automatically. Camera-triggered video mode and the lamp's hardware memory are not fully matched, so this is not a complete replacement for every feature of the official app.
 
-## 使用规则
+## Behaviour
 
-- 亮度跟随与灯体自动感光互斥，关闭跟随后保留当前亮度。
-- 熄屏同步开启时，Studio Display 熄屏即关灯；希望熄屏后保持灯亮，请关闭“熄屏同步”。
-- 环境光采用近 10 秒中位数。明亮关灯约 30 秒，达到昏暗开灯点约 30 秒；环境关灯后的渐进回开约 45 秒。带回差与持续时间判断，不是越过数值就立即切换。环境光规则关灯期间，调节滑块不会重新开灯。
+- Follow Display and the lamp's own auto light are mutually exclusive; turning follow off keeps the current brightness.
+- With Sleep Sync on, the lamp turns off when the Studio Display sleeps. To keep the light on while the display sleeps, turn Sleep Sync off.
+- Ambient light uses the median of the last 10 seconds. Turning off at the bright threshold takes about 30 s, turning on at the dark threshold about 30 s, and the gradual turn-on after an ambient turn-off about 45 s. Hysteresis and minimum durations apply, so crossing a value does not switch immediately. While an ambient rule is holding the lamp off, moving a slider does not turn it back on.
 
-## 验证与限制
+## Verification and limitations
 
 ```bash
 ./scripts/check.sh
@@ -58,16 +61,16 @@ tail -f ~/Library/Logs/iScreenBarStudioSync.log
 launchctl print gui/$(id -u)/local.qiu.iScreenBarStudioSync
 ```
 
-亮度读取使用 macOS 私有 DisplayServices 接口，系统升级后需要复测。USB 报文针对特定灯型，其他 ScreenBar 型号不保证兼容。构建通过、系统状态回读不代表面板确实发光。
+Reading the Studio Display brightness uses the private macOS DisplayServices framework, so re-test after system updates. The USB reports are specific to this lamp model; other ScreenBar models are not guaranteed to work. A successful build or status read-back does not prove the lamp is actually lit.
 
-## 卸载与开发
+## Uninstall and development
 
 ```bash
 ./scripts/uninstall.sh
-# 仅构建，不安装：
+# Build only, without installing:
 ./scripts/build.sh
 ```
 
-卸载将 App 和 LaunchAgent 移至废纸篓，保留日志。构建产物位于 `build/iScreen Menu.app`。目前为本机临时签名，无 Developer ID 公证或自动更新。
+Uninstalling moves the app and the LaunchAgent to the Trash and keeps the log. The build output is `build/iScreen Menu.app`. Builds are signed ad hoc on your Mac; there is no Developer ID notarisation or auto-update.
 
-源码无网络请求、分析或云端依赖。参见 [安全说明](SECURITY.md)、[商标声明](NOTICE.md)、[MIT 许可证](LICENSE)。
+The source makes no network requests and has no analytics or cloud dependencies. See [Security](SECURITY.md), [Trademark notice](NOTICE.md) and the [MIT licence](LICENSE).
