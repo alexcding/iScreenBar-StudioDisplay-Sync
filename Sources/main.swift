@@ -2194,20 +2194,13 @@ private final class StatusIndicator: NSObject {
     }
 
     private func updateIcon(healthy: Bool) {
-        let iconColor: NSColor
-        if !healthy {
-            iconColor = .systemRed
-        } else if lamp.isPowerOn == true {
-            iconColor = .systemYellow
-        } else {
-            iconColor = .systemGray
-        }
-        let configuration = NSImage.SymbolConfiguration(paletteColors: [iconColor])
-        let symbol = NSImage(systemSymbolName: "sun.min.fill", accessibilityDescription: "iScreenBar 状态")?
-            .withSymbolConfiguration(configuration)
-        symbol?.isTemplate = false
+        // 单色模板图标：亮灯为实心太阳，关灯为空心，异常时变暗。
+        let symbolName = healthy && lamp.isPowerOn == true ? "sun.max.fill" : "sun.min"
+        let symbol = NSImage(systemSymbolName: symbolName, accessibilityDescription: "iScreenBar 状态")
+        symbol?.isTemplate = true
         item.button?.attributedTitle = NSAttributedString(string: "")
         item.button?.image = symbol
+        item.button?.appearsDisabled = !healthy
     }
 
     private func selectPresenceDelay(_ seconds: Int) {
