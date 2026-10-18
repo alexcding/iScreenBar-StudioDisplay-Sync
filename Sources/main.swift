@@ -3,6 +3,7 @@ import CoreGraphics
 import Darwin
 import Foundation
 import IOKit.hid
+import Network
 import ObjectiveC.runtime
 import UniformTypeIdentifiers
 
@@ -441,7 +442,10 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
     private let timeTemperatureSwitch = FeatureButton(title: L("Auto Color"), symbol: "circle.lefthalf.filled", accentColor: activeControlColor)
     private let trueToneSwitch = FeatureButton(title: L("Auto Tone"), symbol: "circle.dashed.inset.filled", accentColor: activeControlColor)
     private let trueToneReader = TrueToneReader()
+    private let hue = HueSync()
+    private var hueWindow: HueWindowController?
     private let autoLightSwitch = FeatureButton(title: L("Auto Light"), symbol: "sun.max", accentColor: activeControlColor)
+    private let hueSyncSwitch = FeatureButton(title: L("Hue Sync"), symbol: "lightbulb.2", accentColor: activeControlColor)
     private let presenceSwitch = FeatureButton(title: L("Presence"), symbol: "figure.seated.side", accentColor: activeControlColor)
     private let presenceDelayPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let presenceSensitivityPopup = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -522,6 +526,8 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         }
         presenceSensitivity = UserDefaults.standard.object(forKey: "presenceSensitivity") as? Int ?? 2
         presenceSensitivity = max(0, min(2, presenceSensitivity))
+        lamp.onTemperatureChange = { [hue] kelvin in hue.sync(kelvin: kelvin) }
+        lamp.onBrightnessChange = { [hue] percent in hue.sync(brightness: percent) }
         NSApplication.shared.setActivationPolicy(.accessory)
         NSApplication.shared.finishLaunching()
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -578,6 +584,7 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         menu.addItem(presenceMenuItem())
         menu.addItem(ambientMenuItem())
         menu.addItem(modePresetMenuItem())
+        menu.addItem(hueMenuItem())
 
         menu.addItem(.separator())
         let quit = NSMenuItem(title: L("Quit iScreen Menu"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -648,6 +655,40 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         submenu.addItem(status)
         parent.submenu = submenu
         return parent
+    }
+
+    private func hueMenuItem() -> NSMenuItem {
+        let item = NSMenuItem(title: L("Hue Lights…"), action: #selector(showHueWindow), keyEquivalent: "")
+        item.target = self
+        item.image = HueIcon.sync.image()
+        return item
+    }
+
+    @objc private func hueSyncChanged() {
+        // 未配对时打开 Hue 窗口完成配对；已配对时为普通开关。
+        guard hue.isPaired else {
+            hueSyncSwitch.state = .off
+            statusMenu.cancelTracking()
+            showHueWindow()
+            return
+        }
+        hue.setEnabled(hueSyncSwitch.state == .on)
+        if hue.isEnabled { hue.syncLampState(kelvin: lamp.currentTemperature, brightness: lamp.currentBrightness) }
+        refreshControls()
+        // 开启但尚未选灯时，打开窗口选择要同步的灯。
+        if hue.isEnabled, hue.selectedLightIDs.isEmpty {
+            statusMenu.cancelTracking()
+            showHueWindow()
+        }
+    }
+
+    @objc private func showHueWindow() {
+        if hueWindow == nil {
+            hueWindow = HueWindowController(hue: hue, currentKelvin: { [weak self] in self?.lamp.currentTemperature },
+                                            currentBrightness: { [weak self] in self?.lamp.currentBrightness },
+                                            onSelectionChange: { [weak self] in self?.refreshControls() })
+        }
+        hueWindow?.show(on: item.button?.window?.screen)
     }
 
     private func modePresetMenuItem() -> NSMenuItem {
@@ -1386,6 +1427,9 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         timeTemperatureSwitch.target = self
         timeTemperatureSwitch.action = #selector(timeTemperatureChanged)
         timeTemperatureSwitch.toolTip = L("Adjust color temperature automatically by time of day")
+        hueSyncSwitch.image = HueIcon.sync.image()
+        hueSyncSwitch.target = self
+        hueSyncSwitch.action = #selector(hueSyncChanged)
         trueToneSwitch.target = self
         trueToneSwitch.action = #selector(trueToneTemperatureChanged)
         trueToneSwitch.toolTip = L("Match the lamp’s color temperature to the Studio Display’s True Tone")
@@ -1478,8 +1522,9 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         let sliders = NSStackView(views: [brightnessSlider, temperatureSlider])
         sliders.orientation = .vertical
         sliders.spacing = 8
-        let toggles = toggleGrid([[autoLightSwitch, presenceSwitch], [timeTemperatureSwitch, trueToneSwitch],
-                                  [brightnessFollowSwitch, powerSyncSwitch], [videoModeSwitch]])
+        // 左列为自动调节，右列为同步类开关。
+        let toggles = toggleGrid([[autoLightSwitch, brightnessFollowSwitch], [timeTemperatureSwitch, powerSyncSwitch],
+                                  [trueToneSwitch, hueSyncSwitch], [presenceSwitch, videoModeSwitch]])
 
         // 入座检测、环境光标定与灯光预设属于设置项，放在下方的原生子菜单中。
         let stack = NSStackView(views: [header, sliders, toggles])
@@ -1579,6 +1624,10 @@ private final class StatusIndicator: NSObject, NSMenuDelegate {
         powerSyncSwitch.state = isPowerSyncEnabled ? .on : .off
         timeTemperatureSwitch.state = autoTemperatureMode == .time ? .on : .off
         trueToneSwitch.state = autoTemperatureMode == .trueTone ? .on : .off
+        hueSyncSwitch.state = hue.isPaired && hue.isEnabled ? .on : .off
+        hueSyncSwitch.toolTip = hue.isPaired ? L("Sync the lamp’s color temperature to the selected Hue lights")
+            : L("Pair a Hue Bridge to sync Hue lights")
+        hueSyncSwitch.detail = hue.isPaired ? String(format: L("%d lights"), hue.syncingLightCount) : nil
         updateAmbientStatusLabel()
         selectPresenceDelay(presenceDelaySeconds)
         presenceSensitivityPopup.selectItem(withTag: presenceSensitivity)
@@ -1653,8 +1702,19 @@ private final class LampController {
     private var manager: IOHIDManager
     private var device: IOHIDDevice?
     private let inputBuffer = UnsafeMutablePointer<UInt8>.allocate(capacity: 64)
-    private(set) var currentBrightness: Int?
-    private(set) var currentTemperature: Int?
+    private(set) var currentBrightness: Int? {
+        didSet {
+            if let currentBrightness, currentBrightness != oldValue { onBrightnessChange?(currentBrightness) }
+        }
+    }
+    private(set) var currentTemperature: Int? {
+        didSet {
+            if let currentTemperature, currentTemperature != oldValue { onTemperatureChange?(currentTemperature) }
+        }
+    }
+    /// 色温或亮度变化（本程序写入或从灯具状态回读）时通知，用于同步 Hue 灯。
+    var onTemperatureChange: ((Int) -> Void)?
+    var onBrightnessChange: ((Int) -> Void)?
     private(set) var isPowerOn: Bool?
     private(set) var isAutoLightEnabled: Bool?
     private(set) var isPresenceDetectionEnabled: Bool?
@@ -1948,6 +2008,1325 @@ private final class TrueToneReader {
         // McCamy 近似：由 CIE 1931 xy 色度坐标估算相关色温。
         let n = (x - 0.3320) / (0.1858 - y)
         return Int(449 * n * n * n + 3525 * n * n + 6823.3 * n + 5520.33)
+    }
+}
+
+/// Philips Hue 桥接器本地 API（v1）：通过 Bonjour 找到桥接器，按下按钮配对，
+/// 再把灯的色温与亮度同步到选中的 Hue 灯。
+/// 所有连接都绕过系统代理：代理（如 Surge）会把局域网地址变成 127.0.0.1。
+/// 桥接器证书自签名，以证书 CN 与 Bonjour 公布的 bridgeid 一致来确认是同一台桥接器。
+private final class HueSync: NSObject, URLSessionDelegate {
+    struct Light: Equatable {
+        let id: String
+        let name: String
+        /// 支持的色温范围（mired）；仅可调光的白光灯为 nil，只同步亮度。
+        let mired: ClosedRange<Int>?
+        let isOn: Bool
+        let isReachable: Bool
+        let currentMired: Int?
+        let currentBrightness: Int?
+    }
+
+    struct Room: Equatable {
+        let name: String
+        let lightIDs: [String]
+    }
+
+    enum Status {
+        case idle
+        case searching
+        case notFound
+        case pairing(secondsLeft: Int)
+        case failed(String)
+    }
+
+    private(set) var lights: [Light] = []
+    private(set) var rooms: [Room] = []
+    private(set) var selectedLightIDs: Set<String>
+    /// 总开关：关闭时保留选中的灯，但不再发送。
+    private(set) var isEnabled: Bool
+    private(set) var host: String?
+    private var bridgeID: String?
+    private(set) var status = Status.idle { didSet { onChange?() } }
+    private var username: String?
+    /// 状态、桥接器地址或灯列表变化时调用，用于刷新窗口。
+    var onChange: (() -> Void)?
+    private lazy var session: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.connectionProxyDictionary = [
+            kCFNetworkProxiesHTTPEnable as String: false,
+            kCFNetworkProxiesHTTPSEnable as String: false,
+            "SOCKSEnable": false
+        ]
+        return URLSession(configuration: configuration, delegate: self, delegateQueue: .main)
+    }()
+
+    // 发现：每次发现递增 generation，超时或完成后迟到的结果一律忽略。
+    private var browser: NWBrowser?
+    private var resolvers: [NWConnection] = []
+    private var discoveryGeneration = 0
+    private var discoveryCallbacks: [() -> Void] = []
+    /// 浏览被系统拒绝（未授予本地网络权限）。
+    private var isLocalNetworkDenied = false
+
+    // 配对：每次开始配对递增 generation，取消或重新开始后旧的重试链自动停止。
+    private var pairingGeneration = 0
+    private var pairingDeadline: Date?
+
+    /// 要同步到 Hue 灯的状态；nil 表示该项无需发送。
+    private struct LightState: Equatable {
+        var kelvin: Int?
+        var brightness: Int?
+    }
+
+    // 发送节流：Hue 建议每秒不超过约 10 条灯光指令；拖动时只发送最新值。
+    // desired 为最新目标；confirmed 与 failed 按灯记录桥接器确认或拒绝的值。
+    // 某盏灯某一项与 desired 不同、且不是该灯刚被拒绝的值时才发送。
+    private let minimumInterval: TimeInterval = 0.3
+    private var desired = LightState()
+    private var confirmed: [String: LightState] = [:]
+    private var failed: [String: LightState] = [:]
+    private var isSending = false
+    /// confirmed 被重置时递增：发送中途重置后，旧批次完成时不再写回。
+    private var confirmedEpoch = 0
+    private var lastSentAt = Date.distantPast
+    private var isSendScheduled = false
+    /// 有灯被拒绝（多为灯已关闭）时，定期刷新灯列表，灯重新打开后补发。
+    private var isCatchUpScheduled = false
+    /// 同步项：色温默认开启，亮度默认关闭。
+    private(set) var syncsColor: Bool
+    private(set) var syncsBrightness: Bool
+    /// Hue 亮度相对灯亮度的比例（0.25–3）：房间灯与桌面灯所需亮度不同，不能 1:1 对应。
+    private(set) var brightnessScale: Double
+
+    // 启动时网络或本地网络权限可能尚未就绪：加载灯列表失败后按 2、4、8… 秒（最多 60 秒）重试，直到成功。
+    private var isLoadingLights = false
+    private var hasLoadedLights = false
+    private var lightsRetryDelay: TimeInterval = 2
+    private var isLightsRetryScheduled = false
+
+    var isPaired: Bool { username != nil }
+
+    /// 选中且仍存在于桥接器上的灯数量。
+    var syncingLightCount: Int { lights.filter { selectedLightIDs.contains($0.id) }.count }
+
+    override init() {
+        username = UserDefaults.standard.string(forKey: "hueUsername")
+        host = UserDefaults.standard.string(forKey: "hueBridgeHost").flatMap { Self.isUsable($0) ? $0 : nil }
+        bridgeID = UserDefaults.standard.string(forKey: "hueBridgeID")
+        selectedLightIDs = Set(UserDefaults.standard.stringArray(forKey: "hueLightIDs") ?? [])
+        isEnabled = UserDefaults.standard.object(forKey: "hueSyncEnabled") as? Bool ?? true
+        syncsColor = UserDefaults.standard.object(forKey: "hueSyncColor") as? Bool ?? true
+        syncsBrightness = UserDefaults.standard.bool(forKey: "hueSyncBrightness")
+        brightnessScale = UserDefaults.standard.object(forKey: "hueBrightnessScale") as? Double ?? 1
+        super.init()
+        if isPaired { refreshLights() }
+    }
+
+    private static func isUsable(_ address: String) -> Bool {
+        !address.hasPrefix("127.")
+    }
+
+    // MARK: 设置
+
+    /// 选择变化不触发 onChange，避免整窗重绘打断开关动画；调用方自行更新计数。
+    func setLight(_ id: String, selected: Bool) {
+        if selected { selectedLightIDs.insert(id) } else { selectedLightIDs.remove(id) }
+        UserDefaults.standard.set(Array(selectedLightIDs), forKey: "hueLightIDs")
+        if !selected { failed[id] = nil }
+        // 新选中的灯需要收到当前状态。
+        if selected {
+            confirmed[id] = nil
+            failed[id] = nil
+            confirmedEpoch += 1
+            scheduleSend()
+        }
+    }
+
+    /// 让指定项对所有灯重新发送，并作废正在进行的批次的确认结果。
+    private func resetConfirmed(kelvin: Bool, brightness: Bool) {
+        for id in confirmed.keys {
+            if kelvin { confirmed[id]?.kelvin = nil }
+            if brightness { confirmed[id]?.brightness = nil }
+        }
+        failed = [:]
+        confirmedEpoch += 1
+        scheduleSend()
+    }
+
+    func setSyncsColor(_ enabled: Bool) {
+        syncsColor = enabled
+        UserDefaults.standard.set(enabled, forKey: "hueSyncColor")
+        resetConfirmed(kelvin: true, brightness: false)
+    }
+
+    func setBrightnessScale(_ scale: Double) {
+        brightnessScale = min(max(scale, 0.25), 3)
+        UserDefaults.standard.set(brightnessScale, forKey: "hueBrightnessScale")
+        resetConfirmed(kelvin: false, brightness: true)
+    }
+
+    /// 灯亮度（1–100%）对应的 Hue 亮度（%）：按比例换算后限制在 1–100%。
+    func hueBrightness(forLamp percent: Int) -> Int {
+        Int(min(max(Double(percent) * brightnessScale, 1), 100).rounded())
+    }
+
+    func setSyncsBrightness(_ enabled: Bool) {
+        syncsBrightness = enabled
+        UserDefaults.standard.set(enabled, forKey: "hueSyncBrightness")
+        resetConfirmed(kelvin: false, brightness: true)
+    }
+
+    func setEnabled(_ enabled: Bool) {
+        isEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "hueSyncEnabled")
+        if enabled { resetConfirmed(kelvin: true, brightness: true) }
+        log(enabled ? "已开启 Hue 同步" : "已关闭 Hue 同步")
+    }
+
+    /// 解除配对并忘记桥接器（地址与证书 ID），之后可以与另一台桥接器配对。
+    func unpair() {
+        forgetPairing()
+        host = nil
+        bridgeID = nil
+        selectedLightIDs = []
+        ["hueBridgeHost", "hueBridgeID", "hueLightIDs"].forEach(UserDefaults.standard.removeObject(forKey:))
+        log("已解除 Hue 桥接器配对")
+        status = .idle
+    }
+
+    private func forgetPairing() {
+        username = nil
+        lights = []
+        rooms = []
+        confirmed = [:]
+        failed = [:]
+        confirmedEpoch += 1
+        hasLoadedLights = false
+        UserDefaults.standard.removeObject(forKey: "hueUsername")
+    }
+
+    // MARK: 配对
+
+    /// 找到桥接器后，在 30 秒内每秒尝试注册一次，等待用户按下桥接器按钮。
+    /// 倒计时在找到桥接器后才开始，首次运行时的本地网络授权不占用配对时间。
+    func pair() {
+        pairingGeneration += 1
+        let generation = pairingGeneration
+        let start = { [weak self] in
+            guard let self, generation == self.pairingGeneration else { return }
+            guard self.host != nil else { return }
+            self.pairingDeadline = Date().addingTimeInterval(30)
+            self.status = .pairing(secondsLeft: 30)
+            self.attemptPairing(generation: generation)
+        }
+        if host == nil { discover(completion: start) } else { start() }
+    }
+
+    func cancelPairing() {
+        pairingGeneration += 1
+        pairingDeadline = nil
+        status = .idle
+    }
+
+    private func attemptPairing(generation: Int) {
+        guard generation == pairingGeneration, let deadline = pairingDeadline else { return }
+        request("POST", "", body: ["devicetype": "iscreen_menu#mac"]) { [weak self] json in
+            guard let self, generation == self.pairingGeneration else { return }
+            let result = (json as? [[String: Any]])?.first
+            if let username = (result?["success"] as? [String: Any])?["username"] as? String {
+                self.pairingDeadline = nil
+                self.username = username
+                UserDefaults.standard.set(username, forKey: "hueUsername")
+                log("Hue 桥接器配对成功")
+                self.status = .idle
+                self.refreshLights()
+                return
+            }
+            let secondsLeft = Int(deadline.timeIntervalSinceNow.rounded(.up))
+            guard secondsLeft > 0 else {
+                self.pairingDeadline = nil
+                self.status = json == nil
+                    ? .failed(L("Couldn’t reach the Hue Bridge."))
+                    : .failed(L("The bridge button wasn’t pressed in time."))
+                return
+            }
+            // 101：尚未按下桥接器按钮。
+            self.status = .pairing(secondsLeft: secondsLeft)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.attemptPairing(generation: generation) }
+        }
+    }
+
+    // MARK: 灯与房间
+
+    func refreshLights() {
+        guard let username, !isLoadingLights else { return }
+        guard host != nil else {
+            isLoadingLights = true
+            discover(quietly: true) { [weak self] in
+                guard let self else { return }
+                self.isLoadingLights = false
+                if self.host != nil { self.refreshLights() } else { self.retryLightsLater() }
+            }
+            return
+        }
+        isLoadingLights = true
+        request("GET", "/\(username)/lights") { [weak self] json in
+            guard let self else { return }
+            self.isLoadingLights = false
+            guard let all = json as? [String: [String: Any]] else {
+                self.retryLightsLater()
+                return
+            }
+            self.lightsRetryDelay = 2
+            self.hasLoadedLights = true
+            // 可调色温或至少可调光的灯都列出；只能开关的插座等不列出。
+            let lights: [Light] = all.compactMap { id, info in
+                guard let name = info["name"] as? String, let state = info["state"] as? [String: Any],
+                      state["bri"] != nil else { return nil }
+                let control = (info["capabilities"] as? [String: Any])?["control"] as? [String: Any]
+                let ct = control?["ct"] as? [String: Int]
+                let mired = ct.flatMap { ct in ct["min"].flatMap { min in ct["max"].map { min...$0 } } }
+                return Light(id: id, name: name, mired: mired,
+                             isOn: state["on"] as? Bool ?? false,
+                             isReachable: state["reachable"] as? Bool ?? true,
+                             currentMired: mired == nil ? nil : state["ct"] as? Int,
+                             currentBrightness: state["bri"] as? Int)
+            }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            // 补发轮询每 30 秒刷新一次：列表未变化时不记录日志、不重绘窗口。
+            if lights != self.lights {
+                self.lights = lights
+                log("Hue 桥接器有 \(lights.count) 盏可同步的灯")
+                self.onChange?()
+            }
+            // 已重新打开的灯清除拒绝记录并补发；仍关闭的灯保留记录，不重复发送，继续等待下一轮。
+            // 已取消选中或已从桥接器删除的灯不再等待。
+            let waitingIDs = Set(lights.filter { !($0.isOn && $0.isReachable) }.map(\.id)).intersection(self.selectedLightIDs)
+            self.failed = self.failed.filter { waitingIDs.contains($0.key) }
+            if !self.failed.isEmpty { self.scheduleCatchUp() }
+            self.scheduleSend()
+        }
+        // 按 Hue App 中的房间分组显示。
+        request("GET", "/\(username)/groups") { [weak self] json in
+            guard let self, let groups = json as? [String: [String: Any]] else { return }
+            let rooms: [Room] = groups.values.compactMap { info in
+                guard info["type"] as? String == "Room", let name = info["name"] as? String,
+                      let ids = info["lights"] as? [String] else { return nil }
+                return Room(name: name, lightIDs: ids)
+            }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            if rooms != self.rooms {
+                self.rooms = rooms
+                self.onChange?()
+            }
+        }
+    }
+
+    private func retryLightsLater() {
+        guard isPaired, !isLightsRetryScheduled else { return }
+        isLightsRetryScheduled = true
+        let delay = lightsRetryDelay
+        lightsRetryDelay = min(lightsRetryDelay * 2, 60)
+        log("Hue 灯列表加载失败，\(Int(delay)) 秒后重试")
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            self?.isLightsRetryScheduled = false
+            self?.refreshLights()
+        }
+    }
+
+    // MARK: 同步
+
+    /// 把灯的当前色温与亮度同步到选中的灯（开启同步、选中新灯或更改选项时调用）。
+    func syncLampState(kelvin: Int?, brightness: Int?) {
+        if let kelvin { sync(kelvin: kelvin) }
+        if let brightness { sync(brightness: brightness) }
+    }
+
+    /// 把色温同步到选中的灯。
+    func sync(kelvin: Int) {
+        // 灯具回读可能出现 0 等异常值：超出灯具范围（2700–6500K）的读数直接忽略。
+        guard (2700...6500).contains(kelvin) else { return }
+        desired.kelvin = kelvin
+        targetChanged()
+    }
+
+    /// 把灯的亮度（1–100%）同步到选中的灯。
+    func sync(brightness: Int) {
+        guard (1...100).contains(brightness) else { return }
+        desired.brightness = brightness
+        targetChanged()
+    }
+
+    private func targetChanged() {
+        failed = [:]
+        // 灯列表从未加载成功且没有在加载或等待重试时才主动加载，避免每次变化都请求。
+        if isPaired, isEnabled, !hasLoadedLights, !isLoadingLights, !isLightsRetryScheduled { refreshLights() }
+        scheduleSend()
+    }
+
+    /// 某盏灯尚需发送的项：已开启、与确认值不同、且不是该灯刚被拒绝的值。
+    private func pending(for light: Light) -> LightState {
+        let done = confirmed[light.id] ?? LightState()
+        let rejected = failed[light.id] ?? LightState()
+        var state = LightState()
+        if syncsColor, light.mired != nil, let kelvin = desired.kelvin, kelvin != done.kelvin, kelvin != rejected.kelvin {
+            state.kelvin = kelvin
+        }
+        if syncsBrightness, let brightness = desired.brightness, brightness != done.brightness,
+           brightness != rejected.brightness {
+            state.brightness = brightness
+        }
+        return state
+    }
+
+    private var selectedLights: [Light] { lights.filter { selectedLightIDs.contains($0.id) } }
+
+    private func scheduleSend() {
+        guard isPaired, isEnabled, !isSendScheduled, !isSending,
+              selectedLights.contains(where: { pending(for: $0) != LightState() }) else { return }
+        isSendScheduled = true
+        let delay = max(0, minimumInterval - Date().timeIntervalSince(lastSentAt))
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.sendPending() }
+    }
+
+    private func sendPending() {
+        isSendScheduled = false
+        guard isPaired, isEnabled, !isSending, let username else { return }
+        // 灯列表尚未加载时保留目标值，加载后由 refreshLights 补发。
+        let batch = selectedLights.map { ($0, pending(for: $0)) }.filter { $0.1 != LightState() }
+        guard !batch.isEmpty else { return }
+        lastSentAt = Date()
+        isSending = true
+        let epoch = confirmedEpoch
+        var remaining = batch.count
+        for (light, state) in batch {
+            var body: [String: Any] = ["transitiontime": 3]
+            if let kelvin = state.kelvin, let range = light.mired {
+                let mired = Int((1_000_000 / Double(kelvin)).rounded())
+                body["ct"] = min(max(mired, range.lowerBound), range.upperBound)
+            }
+            // 按比例换算后，再映射到 Hue 亮度范围 1–254。
+            if let brightness = state.brightness {
+                body["bri"] = max(1, Int((Double(hueBrightness(forLamp: brightness)) * 2.54).rounded()))
+            }
+            request("PUT", "/\(username)/lights/\(light.id)/state", body: body) { [weak self] json in
+                guard let self else { return }
+                // 按灯、按项记录结果：桥接器为每个字段分别返回 success 或 error（灯关闭时会拒绝）。
+                if epoch == self.confirmedEpoch {
+                    let accepted = Self.acceptedFields(in: json)
+                    var done = self.confirmed[light.id] ?? LightState()
+                    var rejected = self.failed[light.id] ?? LightState()
+                    if let kelvin = state.kelvin {
+                        if accepted.contains("ct") { done.kelvin = kelvin } else { rejected.kelvin = kelvin }
+                    }
+                    if let brightness = state.brightness {
+                        if accepted.contains("bri") { done.brightness = brightness } else { rejected.brightness = brightness }
+                    }
+                    self.confirmed[light.id] = done
+                    self.failed[light.id] = rejected == LightState() ? nil : rejected
+                }
+                remaining -= 1
+                guard remaining == 0 else { return }
+                self.isSending = false
+                if !self.failed.isEmpty { self.scheduleCatchUp() }
+                // 发送期间若又有新目标，节流后继续发送。
+                self.scheduleSend()
+            }
+        }
+    }
+
+    /// 从 PUT 响应中取出成功设置的字段名（如 "ct"、"bri"）。
+    private static func acceptedFields(in json: Any?) -> Set<String> {
+        let entries = (json as? [[String: Any]]) ?? []
+        return Set(entries.compactMap { entry in
+            (entry["success"] as? [String: Any])?.keys.first?.split(separator: "/").last.map(String.init)
+        })
+    }
+
+    /// 被拒绝的灯（通常是已关闭）30 秒后刷新灯列表再试，直到全部同步。
+    private func scheduleCatchUp() {
+        guard !isCatchUpScheduled else { return }
+        isCatchUpScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in
+            guard let self else { return }
+            self.isCatchUpScheduled = false
+            if self.isPaired, self.isEnabled, !self.failed.isEmpty { self.refreshLights() }
+        }
+    }
+
+    // MARK: 网络
+
+    /// 连接失败时在后台重新发现桥接器（地址可能因 DHCP 改变）并重试一次。
+    /// 桥接器返回 “unauthorized user” 时说明授权已在 Hue App 中撤销，回到未配对状态。
+    private func request(_ method: String, _ path: String, body: [String: Any]? = nil, retry: Bool = true,
+                         completion: @escaping (Any?) -> Void) {
+        guard let host, let url = URL(string: "https://\(host)/api\(path)") else {
+            completion(nil)
+            return
+        }
+        var request = URLRequest(url: url, timeoutInterval: 5)
+        request.httpMethod = method
+        if let body { request.httpBody = try? JSONSerialization.data(withJSONObject: body) }
+        session.dataTask(with: request) { [weak self] data, _, error in
+            guard let self else { return }
+            if let error {
+                log("Hue 请求失败：\(error.localizedDescription)")
+                guard retry else { return completion(nil) }
+                self.discover(quietly: true) { [weak self] in
+                    guard let self, self.host != nil else { return completion(nil) }
+                    self.request(method, path, body: body, retry: false, completion: completion)
+                }
+                return
+            }
+            let json = data.flatMap { try? JSONSerialization.jsonObject(with: $0) }
+            if self.isPaired, let errors = json as? [[String: Any]],
+               errors.contains(where: { ($0["error"] as? [String: Any])?["type"] as? Int == 1 }) {
+                log("Hue 桥接器拒绝授权，需要重新配对")
+                self.forgetPairing()
+                self.status = .failed(L("The Hue Bridge no longer accepts this Mac. Pair again."))
+                return completion(nil)
+            }
+            completion(json)
+        }.resume()
+    }
+
+    /// 通过 Bonjour（_hue._tcp）找到桥接器，并解析为局域网 IPv4 地址。
+    /// 从未找到过桥接器时等待 15 秒（首次运行需要用户允许本地网络访问），否则 5 秒。
+    /// quietly 为 true 时用于后台重试，不改变窗口显示的状态。已配对时只接受同一 bridgeid 的桥接器。
+    func discover(quietly: Bool = false, completion: (() -> Void)? = nil) {
+        if let completion { discoveryCallbacks.append(completion) }
+        guard browser == nil else { return }
+        discoveryGeneration += 1
+        let generation = discoveryGeneration
+        isLocalNetworkDenied = false
+        if !quietly, !isPairingInProgress { status = .searching }
+        let browser = NWBrowser(for: .bonjourWithTXTRecord(type: "_hue._tcp", domain: nil), using: .tcp)
+        self.browser = browser
+        browser.stateUpdateHandler = { [weak self] state in
+            // 未授予本地网络权限时浏览会进入 waiting，并带有 PolicyDenied 错误。
+            switch state {
+            case let .waiting(error):
+                if case let .dns(code) = error, code == DNSServiceErrorType(kDNSServiceErr_PolicyDenied) {
+                    self?.isLocalNetworkDenied = true
+                }
+            case .ready:
+                // 用户随后允许了本地网络访问。
+                self?.isLocalNetworkDenied = false
+            default:
+                break
+            }
+        }
+        var tried = Set<NWEndpoint>()
+        browser.browseResultsChangedHandler = { [weak self] results, _ in
+            guard let self, generation == self.discoveryGeneration else { return }
+            for result in results where !tried.contains(result.endpoint) {
+                tried.insert(result.endpoint)
+                var advertisedID: String?
+                if case let .bonjour(txt) = result.metadata { advertisedID = txt["bridgeid"]?.uppercased() }
+                if self.isPaired, let bridgeID = self.bridgeID, let advertisedID, advertisedID != bridgeID { continue }
+                self.resolve(result.endpoint, bridgeID: advertisedID, generation: generation)
+            }
+        }
+        browser.start(queue: .main)
+        let timeout: TimeInterval = UserDefaults.standard.string(forKey: "hueBridgeHost") == nil ? 15 : 5
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { [weak self] in
+            guard let self, generation == self.discoveryGeneration else { return }
+            self.finishDiscovery()
+        }
+    }
+
+    private var isPairingInProgress: Bool {
+        if case .pairing = status { return true }
+        return false
+    }
+
+    private func resolve(_ endpoint: NWEndpoint, bridgeID: String?, generation: Int) {
+        let parameters = NWParameters.tcp
+        parameters.preferNoProxies = true
+        // 只取 IPv4：IPv6 常解析为链路本地地址，去掉接口后缀后无法连接。
+        (parameters.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options)?.version = .v4
+        let connection = NWConnection(to: endpoint, using: parameters)
+        resolvers.append(connection)
+        connection.stateUpdateHandler = { [weak self] state in
+            guard let self, generation == self.discoveryGeneration, case .ready = state else { return }
+            defer { connection.cancel() }
+            guard case let .hostPort(host, _) = connection.currentPath?.remoteEndpoint else { return }
+            var address = "\(host)"
+            if let percent = address.firstIndex(of: "%") { address = String(address[..<percent]) }
+            guard Self.isUsable(address) else {
+                log("Hue 桥接器解析为本机地址 \(address)，已忽略")
+                return
+            }
+            self.host = address
+            UserDefaults.standard.set(address, forKey: "hueBridgeHost")
+            if let bridgeID, self.bridgeID != bridgeID {
+                self.bridgeID = bridgeID
+                UserDefaults.standard.set(bridgeID, forKey: "hueBridgeID")
+            }
+            log("已找到 Hue 桥接器：\(address)")
+            self.finishDiscovery()
+        }
+        connection.start(queue: .main)
+    }
+
+    private func finishDiscovery() {
+        guard let browser else { return }
+        // 结束本轮发现：取消浏览与所有解析连接，之后到达的结果按 generation 忽略。
+        discoveryGeneration += 1
+        browser.cancel()
+        self.browser = nil
+        resolvers.forEach { $0.cancel() }
+        resolvers = []
+        if case .searching = status {
+            if host != nil {
+                status = .idle
+            } else if isLocalNetworkDenied {
+                status = .failed(L("Local network access is off. Turn on iScreen Menu in System Settings › Privacy & Security › Local Network."))
+            } else {
+                status = .notFound
+            }
+        }
+        let callbacks = discoveryCallbacks
+        discoveryCallbacks = []
+        callbacks.forEach { $0() }
+        onChange?()
+    }
+
+    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+              let trust = challenge.protectionSpace.serverTrust,
+              let host, host == challenge.protectionSpace.host,
+              let certificate = (SecTrustCopyCertificateChain(trust) as? [SecCertificate])?.first else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+        var commonName: CFString?
+        SecCertificateCopyCommonName(certificate, &commonName)
+        let name = (commonName as String?)?.uppercased()
+        // 证书 CN 即 bridgeid。没有 Bonjour 公布的 bridgeid 时，首次连接记住 CN，之后必须一致。
+        if bridgeID == nil, let name {
+            bridgeID = name
+            UserDefaults.standard.set(name, forKey: "hueBridgeID")
+        }
+        guard let name, name == bridgeID else {
+            log("Hue 桥接器证书与配对的桥接器不一致，已拒绝连接")
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
+        completionHandler(.useCredential, URLCredential(trust: trust))
+    }
+}
+
+/// 色温对应的显示颜色，与色温滑块的暖到冷渐变一致。
+private func kelvinColor(_ kelvin: Int) -> NSColor {
+    let stops: [(CGFloat, NSColor)] = [
+        (0, NSColor(srgbRed: 1, green: 0.62, blue: 0.25, alpha: 1)),
+        (0.48, NSColor(srgbRed: 1, green: 0.91, blue: 0.78, alpha: 1)),
+        (0.72, NSColor(srgbRed: 0.85, green: 0.91, blue: 1, alpha: 1)),
+        (1, NSColor(srgbRed: 0.61, green: 0.76, blue: 1, alpha: 1))
+    ]
+    let position = min(max(CGFloat(kelvin - 2700) / CGFloat(6500 - 2700), 0), 1)
+    guard let upper = stops.firstIndex(where: { $0.0 >= position }), upper > 0 else { return stops[0].1 }
+    let (start, from) = stops[upper - 1]
+    let (end, to) = stops[upper]
+    return from.blended(withFraction: (position - start) / (end - start), of: to) ?? from
+}
+
+/// 圆角分组卡片，背景随浅色/深色外观更新。
+private final class CardView: NSView {
+    override var wantsUpdateLayer: Bool { true }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.cornerRadius = 10
+        layer?.cornerCurve = .continuous
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func updateLayer() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = adaptiveColor(light: NSColor(white: 1, alpha: 0.7),
+                                                   dark: NSColor(white: 1, alpha: 0.07)).cgColor
+            layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.4).cgColor
+        }
+        layer?.borderWidth = 0.5
+    }
+}
+
+/// Hue 相关的自绘图标（模板图像，绘制时着色）。在 16×16 网格上绘制，线宽与菜单栏图标一致。
+private enum HueIcon {
+    case sync
+    case colorTemperature
+    case brightness
+    case bridge
+    case bulb(on: Bool)
+
+    func image(size: CGFloat = 16) -> NSImage {
+        let image = NSImage(size: NSSize(width: size, height: size), flipped: false) { rect in
+            let scale = rect.width / 16
+            let transform = AffineTransform(scale: scale)
+            NSColor.black.set()
+            for (path, filled) in self.paths() {
+                path.transform(using: transform)
+                path.lineWidth = 1.4 * scale
+                path.lineCapStyle = .round
+                path.lineJoinStyle = .round
+                if filled { path.fill() } else { path.stroke() }
+            }
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }
+
+    /// 灯泡：玻璃罩、颈部与两道底座线。
+    private static func bulb(center: NSPoint, radius: CGFloat) -> (glass: NSBezierPath, base: NSBezierPath) {
+        let glass = NSBezierPath()
+        let neckTop = center.y - radius * 0.72
+        let neckBottom = center.y - radius * 1.25
+        glass.appendArc(withCenter: center, radius: radius, startAngle: 225, endAngle: 315, clockwise: true)
+        glass.line(to: NSPoint(x: center.x + radius * 0.42, y: neckBottom))
+        glass.line(to: NSPoint(x: center.x - radius * 0.42, y: neckBottom))
+        glass.line(to: NSPoint(x: center.x - radius * 0.71, y: neckTop))
+        glass.close()
+        let base = NSBezierPath()
+        let baseY = neckBottom - radius * 0.38
+        base.move(to: NSPoint(x: center.x - radius * 0.38, y: baseY))
+        base.line(to: NSPoint(x: center.x + radius * 0.38, y: baseY))
+        return (glass, base)
+    }
+
+    private func paths() -> [(NSBezierPath, Bool)] {
+        switch self {
+        case .sync:
+            // 灯泡两侧各一道弧线，表示与 Hue 灯联动。
+            let (glass, base) = Self.bulb(center: NSPoint(x: 8, y: 9.6), radius: 3.6)
+            let left = NSBezierPath()
+            left.appendArc(withCenter: NSPoint(x: 8, y: 9.6), radius: 6.6, startAngle: 145, endAngle: 215)
+            let right = NSBezierPath()
+            right.appendArc(withCenter: NSPoint(x: 8, y: 9.6), radius: 6.6, startAngle: -35, endAngle: 35)
+            return [(glass, false), (base, false), (left, false), (right, false)]
+        case .colorTemperature:
+            // 半实心圆：一半暖、一半冷。
+            let ring = NSBezierPath(ovalIn: NSRect(x: 2, y: 2, width: 12, height: 12))
+            let half = NSBezierPath()
+            half.appendArc(withCenter: NSPoint(x: 8, y: 8), radius: 6, startAngle: 90, endAngle: 270)
+            half.close()
+            return [(ring, false), (half, true)]
+        case .brightness:
+            // 与菜单栏图标一致：圆环加 8 个光点。
+            var paths: [(NSBezierPath, Bool)] = [(NSBezierPath(ovalIn: NSRect(x: 5.2, y: 5.2, width: 5.6, height: 5.6)), false)]
+            for index in 0..<8 {
+                let angle = CGFloat(index) * .pi / 4
+                let center = NSPoint(x: 8 + cos(angle) * 6, y: 8 + sin(angle) * 6)
+                paths.append((NSBezierPath(ovalIn: NSRect(x: center.x - 1, y: center.y - 1, width: 2, height: 2)), true))
+            }
+            return paths
+        case .bridge:
+            // Hue 桥接器：圆角方形机身，中间为圆形连接按钮。
+            let body = NSBezierPath(roundedRect: NSRect(x: 2, y: 2, width: 12, height: 12), xRadius: 3.6, yRadius: 3.6)
+            let button = NSBezierPath(ovalIn: NSRect(x: 5.4, y: 5.4, width: 5.2, height: 5.2))
+            let dot = NSBezierPath(ovalIn: NSRect(x: 7.1, y: 7.1, width: 1.8, height: 1.8))
+            return [(body, false), (button, false), (dot, true)]
+        case let .bulb(on):
+            let (glass, base) = Self.bulb(center: NSPoint(x: 8, y: 9.4), radius: 4.6)
+            return [(glass, on), (glass.copy() as! NSBezierPath, false), (base, false)]
+        }
+    }
+}
+
+/// 圆形图标底：搜索、配对与标题处使用。
+private final class IconBadge: NSView {
+    var color: NSColor { didSet { needsDisplay = true } }
+    private let icon: NSImage
+    private let diameter: CGFloat
+
+    init(icon: NSImage, color: NSColor, diameter: CGFloat) {
+        self.icon = icon
+        self.color = color
+        self.diameter = diameter
+        super.init(frame: .zero)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override var intrinsicContentSize: NSSize { NSSize(width: diameter, height: diameter) }
+
+    override func draw(_ dirtyRect: NSRect) {
+        color.withAlphaComponent(0.22).setFill()
+        NSBezierPath(ovalIn: bounds).fill()
+        let side = (diameter * 0.55).rounded()
+        let rect = NSRect(x: bounds.midX - side / 2, y: bounds.midY - side / 2, width: side, height: side)
+        tintedImage(icon, color: color.blended(withFraction: 0.35, of: .labelColor) ?? color).draw(in: rect)
+    }
+}
+
+/// 配对倒计时圆环。
+private final class CountdownRing: NSView {
+    var progress: CGFloat = 1 { didSet { needsDisplay = true } }
+    var seconds = 30 { didSet { needsDisplay = true } }
+
+    override var intrinsicContentSize: NSSize { NSSize(width: 72, height: 72) }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let rect = bounds.insetBy(dx: 4, dy: 4)
+        let track = NSBezierPath(ovalIn: rect)
+        track.lineWidth = 5
+        NSColor.quaternaryLabelColor.setStroke()
+        track.stroke()
+        let arc = NSBezierPath()
+        arc.appendArc(withCenter: NSPoint(x: rect.midX, y: rect.midY), radius: rect.width / 2,
+                      startAngle: 90, endAngle: 90 - 360 * progress, clockwise: true)
+        arc.lineWidth = 5
+        arc.lineCapStyle = .round
+        NSColor.controlAccentColor.setStroke()
+        arc.stroke()
+        let text = "\(seconds)" as NSString
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 22, weight: .semibold),
+            .foregroundColor: NSColor.labelColor
+        ]
+        let size = text.size(withAttributes: attributes)
+        text.draw(at: NSPoint(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2), withAttributes: attributes)
+    }
+}
+
+/// Hue 窗口中的一行开关：圆形图标、标题与说明、开关；点按整行即可切换。
+/// 同步项与每盏灯都使用这一行。
+private final class HueToggleRow: NSView {
+    private let toggle = AccentSwitch(accentColor: activeControlColor)
+    private let onToggle: (Bool) -> Void
+
+    init(icon: NSImage, tint: NSColor, title: String, detail: String, isOn: Bool, onToggle: @escaping (Bool) -> Void) {
+        self.onToggle = onToggle
+        super.init(frame: .zero)
+        let badge = IconBadge(icon: icon, color: tint, diameter: 28)
+        let name = NSTextField(labelWithString: title)
+        name.font = .systemFont(ofSize: 13, weight: .medium)
+        name.lineBreakMode = .byTruncatingTail
+        let note = NSTextField(labelWithString: detail)
+        note.font = .systemFont(ofSize: 11)
+        note.textColor = .secondaryLabelColor
+        let labels = NSStackView(views: [name, note])
+        labels.orientation = .vertical
+        labels.alignment = .leading
+        labels.spacing = 1
+        toggle.state = isOn ? .on : .off
+        toggle.target = self
+        toggle.action = #selector(toggled)
+        for view in [badge, labels, toggle] as [NSView] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(view)
+        }
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 48),
+            badge.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            badge.centerYAnchor.constraint(equalTo: centerYAnchor),
+            labels.leadingAnchor.constraint(equalTo: badge.trailingAnchor, constant: 10),
+            labels.centerYAnchor.constraint(equalTo: centerYAnchor),
+            labels.trailingAnchor.constraint(lessThanOrEqualTo: toggle.leadingAnchor, constant: -10),
+            toggle.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            toggle.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
+        addGestureRecognizer(NSClickGestureRecognizer(target: self, action: #selector(rowClicked)))
+    }
+
+    /// 灯的一行：灯泡按当前色温着色；仅可调光的灯显示亮度。
+    convenience init(light: HueSync.Light, selected: Bool, onToggle: @escaping (Bool) -> Void) {
+        let kelvin = light.currentMired.map { 1_000_000 / max($0, 1) }
+        let active = light.isOn && light.isReachable
+        let detail: String
+        if !light.isReachable {
+            detail = L("Unreachable")
+        } else if !light.isOn {
+            detail = L("Off")
+        } else if let kelvin {
+            detail = "\(kelvin)K"
+        } else {
+            detail = "\(Int((Double(light.currentBrightness ?? 254) / 2.54).rounded()))%"
+        }
+        self.init(icon: HueIcon.bulb(on: light.isOn).image(size: 32),
+                  tint: active ? kelvinColor(kelvin ?? 4000) : .tertiaryLabelColor,
+                  title: light.name, detail: detail, isOn: selected, onToggle: onToggle)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    @objc private func rowClicked() {
+        toggle.state = toggle.state == .on ? .off : .on
+        toggled()
+    }
+
+    @objc private func toggled() {
+        onToggle(toggle.state == .on)
+    }
+}
+
+/// 让滚动视图内容从顶部开始排列。
+private final class FlippedView: NSView {
+    override var isFlipped: Bool { true }
+}
+
+/// Hue 设置窗口：浮在其他窗口之上，显示桥接器状态、配对进度与按房间分组的灯。
+private final class HueWindowController: NSObject, NSWindowDelegate {
+    private let hue: HueSync
+    private let currentKelvin: () -> Int?
+    private let currentBrightness: () -> Int?
+    /// 总开关或选中的灯变化时通知菜单面板更新 Hue 同步卡片。
+    private let onSelectionChange: () -> Void
+    private let window: NSWindow
+    private let content = NSStackView()
+    private let countLabel = NSTextField(labelWithString: "")
+    private let scaleLabel = NSTextField(labelWithString: "")
+    private weak var scaleHint: NSTextField?
+    private let enableSwitch = AccentSwitch(accentColor: activeControlColor)
+    private weak var scrollView: NSScrollView?
+    private let width: CGFloat = 380
+
+    init(hue: HueSync, currentKelvin: @escaping () -> Int?, currentBrightness: @escaping () -> Int?,
+         onSelectionChange: @escaping () -> Void) {
+        self.hue = hue
+        self.currentKelvin = currentKelvin
+        self.currentBrightness = currentBrightness
+        self.onSelectionChange = onSelectionChange
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 428, height: 300),
+                          styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
+        super.init()
+        window.title = L("Hue Lights")
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.isMovableByWindowBackground = true
+        window.level = .floating
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+        let background = NSVisualEffectView()
+        background.material = .popover
+        background.blendingMode = .behindWindow
+        background.state = .active
+        content.orientation = .vertical
+        content.alignment = .leading
+        content.spacing = 12
+        content.edgeInsets = NSEdgeInsets(top: 36, left: 24, bottom: 20, right: 24)
+        content.translatesAutoresizingMaskIntoConstraints = false
+        background.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.leadingAnchor.constraint(equalTo: background.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: background.trailingAnchor),
+            content.topAnchor.constraint(equalTo: background.topAnchor),
+            content.bottomAnchor.constraint(equalTo: background.bottomAnchor)
+        ])
+        window.contentView = background
+        countLabel.font = UIStyle.captionFont
+        countLabel.textColor = .secondaryLabelColor
+        enableSwitch.target = self
+        enableSwitch.action = #selector(enableChanged)
+        // 窗口关闭时不重绘，打开时 show() 会完整渲染一次。
+        hue.onChange = { [weak self] in
+            guard let self, self.window.isVisible else { return }
+            self.render()
+        }
+    }
+
+    func show(on screen: NSScreen?) {
+        render()
+        if !window.isVisible, let screen = screen ?? NSScreen.main {
+            let visible = screen.visibleFrame
+            window.setFrameOrigin(NSPoint(x: visible.midX - window.frame.width / 2,
+                                          y: visible.midY - window.frame.height / 2))
+        }
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        if hue.host == nil { hue.discover() } else if hue.isPaired { hue.refreshLights() }
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        if case .pairing = hue.status { hue.cancelPairing() }
+    }
+
+    private func render() {
+        let scrollOrigin = scrollView?.contentView.bounds.origin
+        content.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        content.addArrangedSubview(header())
+        if hue.isPaired, !isBusy {
+            content.addArrangedSubview(optionsCard())
+            content.addArrangedSubview(lightList())
+            content.addArrangedSubview(footer())
+        } else {
+            content.addArrangedSubview(setupCard())
+        }
+        window.setContentSize(content.fittingSize)
+        if let scrollOrigin { scrollView?.contentView.scroll(to: scrollOrigin) }
+        updateCount()
+    }
+
+    private var isBusy: Bool {
+        switch hue.status {
+        case .pairing, .searching: return !hue.isPaired
+        default: return false
+        }
+    }
+
+    private func header() -> NSView {
+        let tint = hue.isPaired && hue.isEnabled ? kelvinColor(currentKelvin() ?? 4000) : NSColor.secondaryLabelColor
+        let badge = IconBadge(icon: HueIcon.sync.image(size: 48), color: tint, diameter: 40)
+        let title = NSTextField(labelWithString: L("Hue Lights"))
+        title.font = .systemFont(ofSize: 17, weight: .semibold)
+        let (statusText, statusColor) = statusLine()
+        let dot = StatusDot()
+        dot.color = statusColor
+        let status = NSTextField(labelWithString: statusText)
+        status.font = .systemFont(ofSize: 11)
+        status.textColor = .secondaryLabelColor
+        status.lineBreakMode = .byTruncatingTail
+        let statusRow = NSStackView(views: [dot, status])
+        statusRow.spacing = 5
+        let labels = NSStackView(views: [title, statusRow])
+        labels.orientation = .vertical
+        labels.alignment = .leading
+        labels.spacing = 2
+        var views: [NSView] = [badge, labels]
+        if hue.isPaired {
+            let spacer = NSView()
+            spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            enableSwitch.state = hue.isEnabled ? .on : .off
+            enableSwitch.toolTip = L("Sync the lamp’s color temperature to the selected Hue lights")
+            views += [spacer, enableSwitch]
+        }
+        let row = NSStackView(views: views)
+        row.spacing = 12
+        row.alignment = .centerY
+        row.widthAnchor.constraint(equalToConstant: width).isActive = true
+        return row
+    }
+
+    /// 搜索、配对或未找到桥接器时显示的居中卡片。
+    private func setupCard() -> NSView {
+        var views: [NSView] = []
+        let message: String
+        let detail: String
+        var buttons: [NSButton] = []
+        switch hue.status {
+        case .searching:
+            let spinner = NSProgressIndicator()
+            spinner.style = .spinning
+            spinner.controlSize = .regular
+            spinner.startAnimation(nil)
+            views.append(spinner)
+            message = L("Searching for a Hue Bridge…")
+            detail = L("Make sure the bridge is on the same network as this Mac.")
+        case let .pairing(secondsLeft):
+            let ring = CountdownRing()
+            ring.seconds = secondsLeft
+            ring.progress = CGFloat(secondsLeft) / 30
+            views.append(ring)
+            message = L("Press the link button on the Hue Bridge")
+            detail = L("It’s the round button on top of the bridge.")
+            buttons = [button(L("Cancel"), #selector(cancelPairing))]
+        case .notFound:
+            views.append(IconBadge(icon: HueIcon.bridge.image(size: 64), color: .systemOrange, diameter: 56))
+            message = L("No Hue Bridge found on the local network.")
+            detail = L("Make sure the bridge is on the same network as this Mac.")
+            buttons = [button(L("Search Again"), #selector(search))]
+        case let .failed(error):
+            views.append(IconBadge(icon: HueIcon.bridge.image(size: 64), color: .systemRed, diameter: 56))
+            message = error
+            detail = L("Try pairing again.")
+            buttons = [button(L("Search Again"), #selector(search)), primaryButton(L("Pair"), #selector(pair))]
+        case .idle:
+            views.append(IconBadge(icon: HueIcon.bridge.image(size: 64), color: .controlAccentColor, diameter: 56))
+            if let host = hue.host {
+                message = String(format: L("Hue Bridge found at %@"), host)
+                detail = L("Click Pair, then press the link button on the bridge.")
+                buttons = [button(L("Search Again"), #selector(search)), primaryButton(L("Pair"), #selector(pair))]
+            } else {
+                message = L("Not paired")
+                detail = L("Make sure the bridge is on the same network as this Mac.")
+                buttons = [button(L("Search Again"), #selector(search))]
+            }
+        }
+        let title = NSTextField(wrappingLabelWithString: message)
+        title.font = .systemFont(ofSize: 14, weight: .semibold)
+        title.alignment = .center
+        let subtitle = NSTextField(wrappingLabelWithString: detail)
+        subtitle.font = UIStyle.bodyFont
+        subtitle.textColor = .secondaryLabelColor
+        subtitle.alignment = .center
+        views += [title, subtitle]
+        if !buttons.isEmpty {
+            let actions = NSStackView(views: buttons)
+            actions.spacing = 8
+            views.append(actions)
+        }
+        let stack = NSStackView(views: views)
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 10
+        stack.edgeInsets = NSEdgeInsets(top: 24, left: 20, bottom: 22, right: 20)
+        if !buttons.isEmpty { stack.setCustomSpacing(16, after: views[views.count - 2]) }
+        let card = CardView()
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: card.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: card.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: card.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: card.bottomAnchor),
+            card.widthAnchor.constraint(equalToConstant: width),
+            title.widthAnchor.constraint(lessThanOrEqualToConstant: width - 40),
+            subtitle.widthAnchor.constraint(lessThanOrEqualToConstant: width - 40)
+        ])
+        title.preferredMaxLayoutWidth = width - 40
+        subtitle.preferredMaxLayoutWidth = width - 40
+        return card
+    }
+
+    /// 同步项：色温与亮度各一个开关。
+    private func optionsCard() -> NSView {
+        let card = CardView()
+        let color = HueToggleRow(icon: HueIcon.colorTemperature.image(size: 32), tint: .controlAccentColor,
+                                 title: L("Color Temperature"), detail: L("Match the lamp’s warmth"),
+                                 isOn: hue.syncsColor) { [weak self] on in
+            guard let self else { return }
+            self.hue.setSyncsColor(on)
+            if on { self.syncCurrentState() }
+        }
+        let brightness = HueToggleRow(icon: HueIcon.brightness.image(size: 32), tint: .controlAccentColor,
+                                      title: L("Brightness"), detail: L("Match the lamp’s brightness"),
+                                      isOn: hue.syncsBrightness) { [weak self] on in
+            guard let self else { return }
+            self.hue.setSyncsBrightness(on)
+            if on { self.syncCurrentState() }
+            // 显示或隐藏亮度比例滑块。
+            self.render()
+        }
+        let divider = NSBox()
+        divider.boxType = .separator
+        var views: [NSView] = [color, divider, brightness]
+        if hue.syncsBrightness { views.append(brightnessScaleRow()) }
+        let rows = NSStackView(views: views)
+        rows.orientation = .vertical
+        rows.spacing = 0
+        rows.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(rows)
+        NSLayoutConstraint.activate([
+            rows.leadingAnchor.constraint(equalTo: card.leadingAnchor),
+            rows.trailingAnchor.constraint(equalTo: card.trailingAnchor),
+            rows.topAnchor.constraint(equalTo: card.topAnchor),
+            rows.bottomAnchor.constraint(equalTo: card.bottomAnchor),
+            card.widthAnchor.constraint(equalToConstant: width),
+            color.widthAnchor.constraint(equalToConstant: width),
+            brightness.widthAnchor.constraint(equalToConstant: width),
+            divider.widthAnchor.constraint(equalToConstant: width - 50)
+        ])
+        card.alphaValue = hue.isEnabled ? 1 : 0.5
+        return card
+    }
+
+    /// 亮度比例：Hue 亮度 = 灯亮度 × 比例，拖动时实时预览。
+    private func brightnessScaleRow() -> NSView {
+        let title = NSTextField(labelWithString: L("Hue level"))
+        title.font = .systemFont(ofSize: 12, weight: .medium)
+        let slider = NSSlider(value: hue.brightnessScale, minValue: 0.25, maxValue: 3,
+                              target: self, action: #selector(brightnessScaleChanged(_:)))
+        slider.isContinuous = true
+        slider.controlSize = .small
+        scaleLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+        scaleLabel.alignment = .right
+        let row = NSStackView(views: [title, slider, scaleLabel])
+        row.spacing = 10
+        row.alignment = .centerY
+        row.edgeInsets = NSEdgeInsets(top: 0, left: 50, bottom: 0, right: 12)
+        let hint = NSTextField(labelWithString: "")
+        hint.font = .systemFont(ofSize: 11)
+        hint.textColor = .secondaryLabelColor
+        scaleHint = hint
+        let hintRow = NSStackView(views: [hint])
+        hintRow.edgeInsets = NSEdgeInsets(top: 0, left: 50, bottom: 0, right: 12)
+        let stack = NSStackView(views: [row, hintRow])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 2
+        stack.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 12, right: 0)
+        NSLayoutConstraint.activate([
+            row.widthAnchor.constraint(equalToConstant: width),
+            scaleLabel.widthAnchor.constraint(equalToConstant: 44)
+        ])
+        updateScaleLabels()
+        return stack
+    }
+
+    private func updateScaleLabels() {
+        scaleLabel.stringValue = "\(Int((hue.brightnessScale * 100).rounded()))%"
+        let lamp = currentBrightness() ?? 50
+        scaleHint?.stringValue = String(format: L("Lamp %d%% → Hue %d%%"), lamp, hue.hueBrightness(forLamp: lamp))
+    }
+
+    @objc private func brightnessScaleChanged(_ sender: NSSlider) {
+        // 以 5% 为步进，便于取整数比例。
+        hue.setBrightnessScale((sender.doubleValue * 20).rounded() / 20)
+        updateScaleLabels()
+    }
+
+    /// 按房间分组的灯列表；不属于任何房间的灯放在“其他”。超过高度时滚动。
+    private func lightList() -> NSView {
+        let lightsByID = Dictionary(uniqueKeysWithValues: hue.lights.map { ($0.id, $0) })
+        var sections: [(String, [HueSync.Light])] = hue.rooms.map { room in
+            (room.name, room.lightIDs.compactMap { lightsByID[$0] })
+        }.filter { !$0.1.isEmpty }
+        let grouped = Set(sections.flatMap { $0.1.map(\.id) })
+        let others = hue.lights.filter { !grouped.contains($0.id) }
+        if !others.isEmpty { sections.append((sections.isEmpty ? L("Lights") : L("Other"), others)) }
+
+        let list = NSStackView()
+        list.orientation = .vertical
+        list.alignment = .leading
+        list.spacing = 6
+        if sections.isEmpty {
+            let empty = NSTextField(labelWithString: L("No lights found"))
+            empty.textColor = .secondaryLabelColor
+            list.addArrangedSubview(empty)
+        }
+        for (name, lights) in sections {
+            let header = NSTextField(labelWithString: name.uppercased())
+            header.font = .systemFont(ofSize: 10.5, weight: .semibold)
+            header.textColor = .secondaryLabelColor
+            list.addArrangedSubview(header)
+            list.setCustomSpacing(6, after: header)
+            let card = CardView()
+            let rows = NSStackView()
+            rows.orientation = .vertical
+            rows.spacing = 0
+            rows.translatesAutoresizingMaskIntoConstraints = false
+            for (index, light) in lights.enumerated() {
+                if index > 0 {
+                    let divider = NSBox()
+                    divider.boxType = .separator
+                    rows.addArrangedSubview(divider)
+                    divider.widthAnchor.constraint(equalToConstant: width - 50).isActive = true
+                    rows.setCustomSpacing(0, after: divider)
+                }
+                let row = HueToggleRow(light: light, selected: hue.selectedLightIDs.contains(light.id)) { [weak self] on in
+                    self?.lightToggled(light.id, on: on)
+                }
+                rows.addArrangedSubview(row)
+                row.widthAnchor.constraint(equalToConstant: width).isActive = true
+            }
+            card.addSubview(rows)
+            NSLayoutConstraint.activate([
+                rows.leadingAnchor.constraint(equalTo: card.leadingAnchor),
+                rows.trailingAnchor.constraint(equalTo: card.trailingAnchor),
+                rows.topAnchor.constraint(equalTo: card.topAnchor),
+                rows.bottomAnchor.constraint(equalTo: card.bottomAnchor)
+            ])
+            list.addArrangedSubview(card)
+            list.setCustomSpacing(16, after: card)
+        }
+        list.alphaValue = hue.isEnabled ? 1 : 0.5
+
+        let document = FlippedView()
+        list.translatesAutoresizingMaskIntoConstraints = false
+        document.addSubview(list)
+        NSLayoutConstraint.activate([
+            list.leadingAnchor.constraint(equalTo: document.leadingAnchor),
+            list.topAnchor.constraint(equalTo: document.topAnchor),
+            list.widthAnchor.constraint(equalToConstant: width)
+        ])
+        let height = list.fittingSize.height
+        document.frame = NSRect(x: 0, y: 0, width: width, height: height)
+        let scroll = NSScrollView()
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.documentView = document
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            scroll.widthAnchor.constraint(equalToConstant: width),
+            scroll.heightAnchor.constraint(equalToConstant: min(height, 420))
+        ])
+        scrollView = scroll
+        return scroll
+    }
+
+    private func footer() -> NSView {
+        let refresh = NSButton(image: NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: L("Refresh Lights")) ?? NSImage(),
+                               target: self, action: #selector(refresh))
+        refresh.bezelStyle = .rounded
+        refresh.toolTip = L("Refresh Lights")
+        let unpair = button(L("Unpair Hue Bridge"), #selector(unpair))
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let row = NSStackView(views: [countLabel, spacer, refresh, unpair])
+        row.spacing = 8
+        row.alignment = .centerY
+        row.widthAnchor.constraint(equalToConstant: width).isActive = true
+        return row
+    }
+
+    private func updateCount() {
+        countLabel.stringValue = String(format: L("%d of %d lights syncing"), hue.syncingLightCount, hue.lights.count)
+    }
+
+    private func statusLine() -> (String, NSColor) {
+        switch hue.status {
+        case .searching:
+            return (L("Searching for a Hue Bridge…"), .systemYellow)
+        case .notFound:
+            return (L("No Hue Bridge found"), .systemRed)
+        case .pairing:
+            return (L("Waiting for the link button…"), .systemYellow)
+        case let .failed(message):
+            return (message, .systemRed)
+        case .idle:
+            guard let host = hue.host else {
+                return hue.isPaired ? (L("Hue Bridge not reachable"), .systemOrange) : (L("Not paired"), .systemGray)
+            }
+            guard hue.isPaired else { return (String(format: L("Hue Bridge found at %@"), host), .systemGray) }
+            return hue.isEnabled
+                ? (String(format: L("Connected · %@"), host), .systemGreen)
+                : (String(format: L("Sync paused · %@"), host), .systemGray)
+        }
+    }
+
+    private func button(_ title: String, _ action: Selector) -> NSButton {
+        let button = NSButton(title: title, target: self, action: action)
+        button.bezelStyle = .rounded
+        button.controlSize = .large
+        return button
+    }
+
+    private func primaryButton(_ title: String, _ action: Selector) -> NSButton {
+        let button = self.button(title, action)
+        button.keyEquivalent = "\r"
+        return button
+    }
+
+    private func lightToggled(_ id: String, on: Bool) {
+        hue.setLight(id, selected: on)
+        if on { syncCurrentState() }
+        updateCount()
+        onSelectionChange()
+    }
+
+    @objc private func enableChanged() {
+        hue.setEnabled(enableSwitch.state == .on)
+        if hue.isEnabled { syncCurrentState() }
+        render()
+        onSelectionChange()
+    }
+
+    private func syncCurrentState() {
+        hue.syncLampState(kelvin: currentKelvin(), brightness: currentBrightness())
+    }
+
+    @objc private func pair() { hue.pair() }
+    @objc private func cancelPairing() { hue.cancelPairing() }
+    @objc private func search() { hue.discover() }
+    @objc private func refresh() { hue.refreshLights() }
+    @objc private func unpair() {
+        hue.unpair()
+        onSelectionChange()
     }
 }
 

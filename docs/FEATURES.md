@@ -81,6 +81,9 @@
 - Uses 50K as the internal transition step and writes to the lamp at most once per minute.
 - No colour temperature is written while the lamp is off or the Studio Display screen is off.
 - After auto colour temperature is turned off, the current colour temperature is kept.
+- "Auto Tone (自动色调)" instead matches the lamp to the Studio Display's current white point, read from the private CoreBrightness framework. It follows True Tone and Night Shift; with both off it follows the display's native white (about 6500K).
+- Auto Tone checks the white point every 5 seconds and writes when it moves at least 75K, rounded to 100K.
+- Only one of Auto Color and Auto Tone can be on. Choosing a preset turns them off; an app-bound mode pauses them while that app is in front.
 
 ## 10. Lighting Mode Presets
 
@@ -92,7 +95,16 @@
 - Applying a preset automatically turns the lamp on, writes brightness and colour temperature, sets the video mode, and turns off iScreenBar brightness follow.
 - The current lighting mode can be bound to a specific macOS app; when the foreground app changes, the corresponding mode is applied automatically.
 
-## 11. USB Disconnection, Reconnection and Fault Tolerance
+## 11. Philips Hue Sync
+
+- The "Hue Lights…" menu item opens a window that stays on top. It finds a Hue Bridge on the local network over Bonjour and pairs after the bridge's link button is pressed.
+- The window lists the bridge's lights grouped by Hue room. Lights with colour temperature and dimmable white lights can be selected; each row shows whether the light is on, off or unreachable.
+- Options: Color Temperature (on by default) and Brightness (off by default). Brightness uses a "Hue level" from 25% to 300% of the lamp's brightness, capped at 100%.
+- The "Hue Sync" toggle in the menu turns syncing on or off without losing the selection; before pairing it opens the Hue window.
+- Updates are throttled to one batch every 0.3 seconds and are confirmed per light. Lights that reject an update (usually because they are off) are retried after the light list is refreshed, every 30 seconds until they accept it.
+- All bridge connections bypass the system proxy. The bridge certificate must match the bridge ID. See [Security](../SECURITY.md).
+
+## 12. USB Disconnection, Reconnection and Fault Tolerance
 
 - The iScreenBar USB HID connection is checked every 2 seconds.
 - When the lamp is unplugged, loses power or HID commands stop working, the icon shows the error dot and a log entry is written.
@@ -100,21 +112,22 @@
 - When the Studio Display is disconnected the program stays resident, and after it reconnects the display listener and the ambient light sensor connection are rebuilt automatically.
 - All key states and errors are written to `~/Library/Logs/iScreenBarStudioSync.log`.
 
-## 12. Interface and Interaction
+## 13. Interface and Interaction
 
 - Native AppKit system menu, no Dock icon required, adapts automatically to light/dark mode.
 - Two-column toggle cards: the round SF Symbols icon uses the accent colour when on, and some toggles show a short description when on.
-- The brightness slider has a white fill; the colour temperature slider is a warm-to-cool gradient with a white marker; clicking anywhere on the track jumps to that position, and the value is written to the lamp on release.
-- The brightness slider is greyed out when auto light is on, and the colour temperature slider is greyed out when auto colour temperature is on; related controls are greyed out when the lamp is offline.
+- The brightness slider has a white fill; the colour temperature slider is a warm-to-cool gradient with a white marker; clicking anywhere on the track jumps to that position, and the lamp follows while dragging (at most every 50 ms); the exact value is written on release.
+- The brightness slider is greyed out when auto light is on, and the colour temperature slider is greyed out when Auto Color or Auto Tone is on; related controls are greyed out when the lamp is offline.
 
-## 13. Local Storage, Privacy and Installation
+## 14. Local Storage, Privacy and Installation
 
 - All switches, thresholds, presets and app bindings are stored in the local `UserDefaults`.
-- No account, cloud service, network API or analytics is required.
+- No account, cloud service or analytics is required. The only network access is the optional Philips Hue sync with a Hue Bridge on the local network.
+- The Hue API key, bridge address and bridge ID are stored in the local `UserDefaults`.
 - The install script compiles locally, signs ad hoc, installs to `~/Applications`, and creates a user-level LaunchAgent.
 - The uninstall script stops the service and moves the installed app and the LaunchAgent to the Trash; the log is kept by default for troubleshooting.
 
-## 14. Implementation Limits and Risk Notes
+## 15. Implementation Limits and Risk Notes
 
 - Verified on an Apple Silicon Mac, macOS 26, Apple Studio Display and BenQ iScreenBar `VID 0x04A5 / PID 0x2501`.
 - iScreenBar control uses a device-specific 33-byte HID report; compatibility with other models is not guaranteed.
@@ -122,17 +135,17 @@
 - The Studio Display is identified by Apple vendor ID 0x0610 and product IDs 0xAE46 / 0xAE3A; models not listed are identified by the display name "Studio Display".
 - Some details of lamp auto light and presence detection depend on the lamp firmware version.
 
-## 15. Feature Priority
+## 16. Feature Priority
 
 1. Studio Display sleep sync: the lamp stays off while the screen is off.
 2. Studio Display ambient turn-off lock: once the bright threshold is reached, presence detection, auto light and manual adjustment are prevented from turning the lamp back on.
 3. Lamp auto light and iScreenBar brightness follow are mutually exclusive.
 
-## 16. Differences from the Official BenQ iScreenBar App
+## 17. Differences from the Official BenQ iScreenBar App
 
 > The comparison is based on the official BenQ iScreenBar product page, quick start guide and public feature descriptions. The official app is updated by region and version; the comparison below is based on public material as of August 2026 and the official app on this machine.
 
-### 16.1 Features Both Have
+### 17.1 Features Both Have
 
 | Feature | Official BenQ App | This tool | Main difference |
 | --- | --- | --- | --- |
@@ -145,7 +158,7 @@
 | Per-app mode binding | Supported | Supported | Both can apply the corresponding lighting mode when the foreground app changes. |
 | Turn lamp on/off with the display | Supported | Supported | The official app targets compatible iMacs; this tool fills in the standalone Studio Display screen-off scenario. |
 
-### 16.2 Features This Tool Adds over the Official App
+### 17.2 Features This Tool Adds over the Official App
 
 - **Dedicated Studio Display support**: the officially published compatibility range is 2021 and later iMacs and does not include the Apple Studio Display; this tool specifically listens for Studio Display sleep, screen-off, wake and disconnect/reconnect.
 - **Studio Display brightness linked to the lamp**: keeps the brightness difference between the lamp and the display, and changes the iScreenBar in step when the Studio Display is adjusted.
@@ -156,7 +169,7 @@
 - **USB fault tolerance and logging**: the HID Manager is rebuilt automatically after the lamp is unplugged and replugged, and a local log is kept for troubleshooting.
 - **Local and auditable**: configuration is stored only on this machine, with no account, cloud or analytics; the source code is public under the MIT licence.
 
-### 16.3 Where the Official App Currently Has the Advantage
+### 17.3 Where the Official App Currently Has the Advantage
 
 - **Official signing, release and firmware support**: the official app is maintained by BenQ and has formal support for firmware upgrades, regional versions and lamp protocol changes.
 - **Native iMac compatibility**: the official app is designed around the hardware, power supply, camera and wake flow of 2021 and later iMacs, so its compatibility boundary is clearer.
@@ -165,7 +178,7 @@
 - **Polish and support channels**: the official app has more complete onboarding, upgrades, signing, notarisation, customer service and warranty support.
 - **Lower risk on system upgrades**: this tool reads Studio Display brightness through a private macOS interface and must be re-verified after system upgrades.
 
-### 16.4 Not Yet Fully Aligned or Still to Be Verified
+### 17.4 Not Yet Fully Aligned or Still to Be Verified
 
 - Automatically switching video mode when the camera is enabled.
 - The protocol the official app uses to read, overwrite and recall the lamp's hardware "My Favourite" memory.
@@ -173,11 +186,11 @@
 - The exact behaviour of official mode binding when apps quit, in full screen, across multiple Spaces and in multi-user sessions.
 - Developer ID signing, notarisation, automatic updates and a one-click install experience for ordinary users.
 
-### 16.5 One-Sentence Positioning
+### 17.5 One-Sentence Positioning
 
 **The official app is complete first-party control software for compatible iMacs; this tool keeps the main lamp control capabilities and adds sleep sync, brightness linkage, ambient light rules and fault recovery for the Studio Display.**
 
-### 16.6 Official References
+### 17.6 Official References
 
 - [BenQ iScreenBar official product page](https://www.benq.com/en-us/lighting/monitor-light/iscreenbar.html)
 - [BenQ iScreenBar quick start guide](https://www.benq.com/en-us/qsg/iscreenbar/guide.html)

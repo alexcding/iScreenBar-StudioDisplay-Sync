@@ -24,9 +24,9 @@ See the [UI guide](docs/UI-GUIDE.md) and the [full feature list](docs/FEATURES.m
 | Area | What it does |
 | --- | --- |
 | Header | Connection status, current brightness and colour temperature; the round button on the right turns the lamp on or off |
-| Sliders | Brightness and 2700–6500K colour temperature. The brightness slider is disabled while Auto Light is on; the colour slider is disabled while Auto Color is on |
-| Toggles | Auto Light (自动感光), Auto Color (自动色温), Presence (入座检测), Video Mode (视频模式), Follow Display (亮度跟随), Sleep Sync (熄屏同步) |
-| Submenus | Presence settings (away time, sensitivity), Ambient light calibration, Light presets and Mode Center |
+| Sliders | Brightness and 2700–6500K colour temperature, applied to the lamp while dragging. The brightness slider is disabled while Auto Light is on; the colour slider is disabled while Auto Color or Auto Tone is on |
+| Toggles | Left column: Auto Light (自动感光), Auto Color (自动色温), Auto Tone (自动色调), Presence (入座检测). Right column: Follow Display (亮度跟随), Sleep Sync (熄屏同步), Hue Sync (Hue 同步), Video Mode (视频模式) |
+| Submenus | Presence settings (away time, sensitivity), Ambient light calibration, Light presets and Mode Center, Hue Lights |
 
 The app has no Dock icon. Hover over the menu bar icon to see brightness and colour temperature.
 
@@ -73,4 +73,4 @@ Reading the Studio Display brightness uses the private macOS DisplayServices fra
 
 Uninstalling moves the app and the LaunchAgent to the Trash and keeps the log. The build output is `build/iScreen Menu.app`. Builds are signed ad hoc on your Mac; there is no Developer ID notarisation or auto-update.
 
-The source makes no network requests and has no analytics or cloud dependencies. See [Security](SECURITY.md), [Trademark notice](NOTICE.md) and the [MIT licence](LICENSE).
+The app has no analytics or cloud dependencies. Its only network traffic is the optional Philips Hue sync, which talks directly to a Hue Bridge on the local network (Bonjour discovery and HTTPS to the bridge); nothing goes on the network until you open the Hue Lights window or pair a bridge. Auto Tone reads the display white point through the private CoreBrightness framework. See [Security](SECURITY.md), [Trademark notice](NOTICE.md) and the [MIT licence](LICENSE).
